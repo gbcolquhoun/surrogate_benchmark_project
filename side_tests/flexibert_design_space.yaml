@@ -1,0 +1,50 @@
+# FlexiBert design space config
+
+
+architecture: flexibert
+benchmark_file: datasets/new_flexibert_data.csv
+fixed_length: 22
+
+metrics:
+  - latency
+  - accuracy
+  #- memory
+
+
+search_space:
+  hidden_size:
+    - 128
+    - 256
+    - 512
+  num_heads:
+    - 2
+    - 4
+    - 8
+  encoder_layers:
+    - 2
+    - 4
+    - 6
+  operation_types:
+    - sa
+    - l
+    - c
+  number_of_feed-forward_stacks:
+    - 1
+    - 2 # An extra
+    - 3 # An extra
+  feed-forward_hidden:
+    - 512
+    - 1024
+    - 2048
+    - 4096 # An extra
+  operation_parameters:
+    sa:
+      - sdp
+      - wma # An extra
+    l:
+      - dft # An extra
+      - dct # An extra
+    c:
+      - 5 # An extra
+      - 9 # An extra
+      - 13 # An extra

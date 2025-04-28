@@ -1,0 +1,8 @@
+# Search parameters
+
+evolution_iterations: 5
+population_size: 20
+crossover_rate: 0.8
+mutation_rate: 0.1
+
+

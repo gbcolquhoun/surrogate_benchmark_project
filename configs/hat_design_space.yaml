@@ -1,0 +1,69 @@
+# hardware aware transformer design space config
+# iwlst
+
+architecture: hat
+benchmark_file: evo_search/datasets/iwslt14deen_gpu_titanxp_all.csv
+fixed_length: 40
+
+metrics:
+  - latency
+  - BLEU
+
+
+search_space:
+  # SubTransformers search space
+  encoder-embed-choice: [640, 512]
+  decoder-embed-choice: [640, 512]
+
+  encoder-ffn-embed-dim-choice: [2048, 1024, 512]
+  decoder-ffn-embed-dim-choice: [2048, 1024, 512]
+
+  encoder-layer-num-choice: [6]
+  decoder-layer-num-choice: [6, 5, 4, 3, 2, 1]
+
+  encoder-self-attention-heads-choice: [4, 2]
+  decoder-self-attention-heads-choice: [4, 2]
+  decoder-ende-attention-heads-choice: [4, 2]
+
+  # for arbitrary encoder decoder attention. -1 means attending to last one encoder layer
+  # 1 means last two encoder layers, 2 means last three encoder layers
+  decoder-arbitrary-ende-attn-choice: [-1, 1, 2]
+
+# encoder:
+#     embed_choice: [640, 512]
+    
+#     ffn_embed_choice:
+#     - 2048
+#     - 1024
+#     - 512
+#     layer_num:
+#     - 6
+#     SA_heads:
+#     - 4
+#     - 2
+# decoder:
+#     embed_choice:
+#     - 640
+#     - 512
+#     ffn_embed_choice:
+#     - 2048
+#     - 1024
+#     - 512
+#     layer_num:
+#     - 6
+#     - 5
+#     - 4
+#     - 3
+#     - 2
+#     - 1
+#     SA_heads:
+#     - 4
+#     - 2
+#     ende_heads:
+#     - 4
+#     - 2
+#     arbitrary_attention:
+#     - -1
+#     - 1
+#     - 2
+  

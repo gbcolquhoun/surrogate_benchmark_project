@@ -1,0 +1,20 @@
+# --- Python artefacts ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# --- Virtual environments / build ---
+.env/
+venv/
+myenv/
+
+# --- Logs & output ---
+output/
+logs/
+*.log
+*.pt
+*.ckpt
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
