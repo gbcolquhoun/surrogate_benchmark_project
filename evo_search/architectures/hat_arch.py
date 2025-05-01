@@ -11,10 +11,12 @@ from fairseq.models.transformer_super import TransformerSuperModel
 import pandas as pd
 import yaml
 import subprocess
-
-HAT_REPO = "/home/graham/Documents/hardware-aware-transformers"
-import sys;  sys.path.append(HAT_REPO)        # so `latency_predictor` is importable
+import os, pathlib, sys
 from latency_predictor import LatencyPredictor
+
+# HAT_REPO = "/home/graham/Documents/hardware-aware-transformers"
+# import sys;  sys.path.append(HAT_REPO)        # so `latency_predictor` is importable
+
 '''
 import sys, pathlib, os
 ROOT = pathlib.Path.cwd()
@@ -23,6 +25,10 @@ sys.path.append(str(ROOT))
 sys.path.append(str(HAT_REPO))
 
 '''
+
+HAT_REPO = pathlib.Path(__file__).resolve().parents[3] / "hardware-aware-transformers"
+ckpt_rel = "latency_dataset/predictors/iwslt14deen_gpu_titanxp.pt"
+
 
 class hat_architecture(BaseArchitecture):
    
@@ -36,15 +42,13 @@ class hat_architecture(BaseArchitecture):
         search_space = design_space.get('search_space', {})
         xl, xu = self.build_bounds(search_space)
         
-        predictor_ckpt = os.path.join(
-            HAT_REPO, "latency_dataset","predictors", "iwslt14deen_gpu_titanxp.pt"
-        )
+        ckpt_path = HAT_REPO / ckpt_rel
 
         FEATURE_NORM = [640, 6, 2048, 6, 640, 6, 2048, 6, 6, 2]  # from paper
         LAT_NORM     = 200                                      # from paper
 
         self.latency_predictor = LatencyPredictor(
-            ckpt_path        = predictor_ckpt,
+            ckpt_path        = ckpt_path,
             lat_dataset_path = "",      # not needed for inference
             feature_norm     = FEATURE_NORM,
             lat_norm         = LAT_NORM,
