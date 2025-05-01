@@ -10,7 +10,7 @@ myenv/
 
 # --- Logs & output ---
 graphs/
-output/
+#output/
 logs/
 *.log
 *.pt
