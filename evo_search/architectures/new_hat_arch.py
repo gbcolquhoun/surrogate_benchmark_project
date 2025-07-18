@@ -1,10 +1,9 @@
 # /home/graham/Documents/surrogate_benchmark_project/evo_search/architectures/hat_arch.py
+from __future__ import annotations
 import random
 import numpy as np
 from .base_architecture import BaseArchitecture
 import torch
-import os
-import sys
 import re
 from fairseq.models.transformer import TransformerModel
 from fairseq.models.transformer_super import TransformerSuperModel
@@ -13,20 +12,10 @@ import yaml
 import subprocess
 import os, pathlib, sys
 from latency_predictor import LatencyPredictor
-from fairseq import tasks, utils
-from fairseq import checkpoint_utils, sequence_generator
-
-# HAT_REPO = "/home/graham/Documents/hardware-aware-transformers"
-# import sys;  sys.path.append(HAT_REPO)        # so `latency_predictor` is importable
-
-'''
-import sys, pathlib, os
-ROOT = pathlib.Path.cwd()
-HAT_REPO = ROOT.parent / "hardware-aware-transformers"
-sys.path.append(str(ROOT))
-sys.path.append(str(HAT_REPO))
-
-'''
+import time
+from fairseq.sequence_generator import SequenceGenerator
+import sacrebleu
+from fairseq import checkpoint_utils, tasks, utils, options
 
 HAT_REPO = pathlib.Path(__file__).resolve().parents[3] / "hardware-aware-transformers"
 ckpt_rel = "latency_dataset/predictors/iwslt14deen_gpu_titanxp.pt"
@@ -62,29 +51,33 @@ class hat_architecture(BaseArchitecture):
         #self.DATA_BIN = "/home/graham/Documents/data/binary/iwslt14_de_en_valid1000"
         self.SAMPLE_CONFIG_PATH = "/home/graham/Documents/surrogate_benchmark_project/output/intermediate_config.yaml"
 
-        ensemble, self.args, self.task = checkpoint_utils.load_model_ensemble_and_task([self.CHECKPOINT_FILE], arg_overrides={"data": str(self.DATA_BIN)})
 
-        self.model = ensemble[0]
-        self.model.eval()
+        # load the supertransfomer
+        hub_interface = TransformerSuperModel.from_pretrained(
+            self.MODEL_DIR,
+            checkpoint_file=self.CHECKPOINT_FILE,
+            data_name_or_path=self.DATA_BIN,
+            verbose = False
+        )
+        self.super_model = hub_interface.models[0]
+        self.super_model.eval()
+        self.task = hub_interface.task
 
-        args_ns = self.task.args                       # Namespace saved in checkpoint
-        args_ns.dataset_impl = getattr(args_ns, "dataset_impl", "mmap")
-        args_ns.combine       = getattr(args_ns, "combine", False)
+        legacy_args = self.task.args                 # a Namespace
 
+        if not hasattr(legacy_args, "dataset_impl"):
+            legacy_args.dataset_impl = "mmap"
+
+        if not hasattr(legacy_args, "combine"):
+            legacy_args.combine = False
         self.task.load_dataset("valid")
-        #valid_set = self.task.dataset("valid")
-        #self.dataloader = self.task.get_batch_iterator(dataset=valid_set).next_epoch_itr(shuffle=False)
-        setattr(self.args, "sentence_avg", getattr(self.args, "sentence_avg", False))
-        setattr(self.args, "criterion", getattr(self.args, "criterion", "cross_entropy"))
-        self.criterion = self.task.build_criterion(args_ns) 
-        self.pad = self.task.target_dictionary.pad()
-
+        full_valid   = self.task.dataset('valid')
+        self.eval_samples = [full_valid[i] for i in range(min(200, len(full_valid)))]
 
         super().__init__(n_var=self.fixed_length, n_obj=num_obj, n_ieq_constr=0, xl=xl, xu=xu, vtype=int)
         
         
     def build_bounds(self, search_space):
-        
         """
         Build lower and upper bounds (xl and xu) for the genome,
         based on the search space definitions and mapping dictionaries.
@@ -201,7 +194,215 @@ class hat_architecture(BaseArchitecture):
             
         # Convert to numpy arrays and return.
         return np.array(xl), np.array(xu)
+    
+    def new_evaluate_accuracy(self, genome: np.ndarray):
+        bleu, enc_ms, dec_ms = 0.0, 0.0, 0.0          # default fallback
 
+        # ----- 1. genome → sub-transformer cfg & activate it -----
+        cfg = self._genome_to_subtransformer_cfg(genome)
+        self.super_model.set_sample_config(cfg)
+        model = self.super_model.cuda() if torch.cuda.is_available() else self.super_model
+        model.eval()
+
+        # ----- 2. timed generator -----
+        gen = TimedSequenceGenerator(
+        self.task,                 # <-- pass the task explicitly
+        [model],
+        beam_size=1,
+        max_len_b=256,
+        eos = self.task.target_dictionary.eos()
+        )
+
+        sys_out, ref_out, enc_list, dec_list = [], [], [], []
+        with torch.no_grad():
+            for sample in self.eval_samples:
+                sample = utils.move_to_cuda(sample) if torch.cuda.is_available() else sample
+                hypos, enc_t, dec_t = gen.generate([model], sample)
+                enc_list.append(enc_t);  dec_list.append(dec_t)
+
+                hyp_tok = hypos[0][0]["tokens"].int().cpu()
+                tgt_tok = sample["target"].int().cpu()
+                sys_out.append(self.task.target_dictionary.string(hyp_tok))
+                ref_out.append(self.task.target_dictionary.string(tgt_tok))
+
+        bleu   = sacrebleu.corpus_bleu(sys_out, [ref_out]).score
+        enc_ms = float(np.mean(enc_list))
+        dec_ms = float(np.mean(dec_list))
+        return bleu, enc_ms, dec_ms
+
+
+    def _genome_to_subtransformer_cfg(self, genome: np.ndarray) -> dict:
+        """
+        Convert a 40-gene chromosome to the nested sub-Transformer config
+        understood by HAT (and by self.latency_predictor).
+
+        Returns
+        -------
+        dict  with "encoder" and "decoder" fields containing plain Python
+            ints / lists (no numpy types!).
+        """
+        # ---- inverse lookup tables -----------------------------------
+        embed_dim_inv       = {0: 512, 1: 640}
+        ffn_dim_inv         = {0: 512, 1: 1024, 2: 2048}
+        nheads_inv          = {0: 2,   1: 4}
+        arbitrary_attn_inv  = {0: -1,  1: 1,  2: 2}
+
+        # ---- global genes --------------------------------------------
+        enc_layers   = int(genome[0])
+        dec_layers   = int(genome[1])
+        enc_emb_dim  = embed_dim_inv[int(genome[2])]
+        dec_emb_dim  = embed_dim_inv[int(genome[3])]
+
+        # ---- per-layer blocks (each padded to 6 -> slice) ------------
+        enc_ffn  = [ffn_dim_inv[int(x)]        for x in genome[4:10][:enc_layers]]
+        dec_ffn  = [ffn_dim_inv[int(x)]        for x in genome[10:16][:dec_layers]]
+
+        enc_sa   = [nheads_inv[int(x)]         for x in genome[16:22][:enc_layers]]
+        dec_sa   = [nheads_inv[int(x)]         for x in genome[22:28][:dec_layers]]
+
+        dec_ende = [nheads_inv[int(x)]         for x in genome[28:34][:dec_layers]]
+        dec_arbi = [arbitrary_attn_inv[int(x)] for x in genome[34:40][:dec_layers]]
+
+        # ---- pack into the format HAT expects ------------------------
+        return {
+            "encoder": {
+                "encoder_embed_dim"            : enc_emb_dim,
+                "encoder_layer_num"            : enc_layers,
+                "encoder_ffn_embed_dim"        : enc_ffn,
+                "encoder_self_attention_heads" : enc_sa,
+            },
+            "decoder": {
+                "decoder_embed_dim"            : dec_emb_dim,
+                "decoder_layer_num"            : dec_layers,
+                "decoder_ffn_embed_dim"        : dec_ffn,
+                "decoder_self_attention_heads" : dec_sa,
+                "decoder_ende_attention_heads" : dec_ende,
+                "decoder_arbitrary_ende_attn"  : dec_arbi,
+            },
+        }
+    def evaluate_accuracy(self, genome):
+        """
+        Given a candidate genome (list of 40 discrete genes), extract the configuration 
+        parameters and compute a BLEU score
+        """
+        
+        encoder_layer_num = genome[0]   # Already in [1,6]
+        decoder_layer_num = genome[1]   # Already in [1,6]
+        embed_dim_mapping_inv = {0: 512, 1: 640}
+        ffn_embed_dim_mapping_inv = {0: 512, 1: 1024, 2: 2048}
+        sa_mapping_inv = {0: 2, 1: 4}
+        arbitrary_mapping_inv = {0: -1, 1: 1, 2: 2}
+        encoder_embed_dim = embed_dim_mapping_inv[genome[2]]
+        decoder_embed_dim = embed_dim_mapping_inv[genome[3]]
+        enc_ffn_genes = genome[4:10]
+        dec_ffn_genes = genome[10:16]
+        enc_sa_genes = genome[16:22]
+        dec_sa_genes = genome[22:28]
+        dec_ende_genes = genome[28:34]
+        dec_arbitrary_genes = genome[34:40]
+        
+        # Extract only the entries corresponding to the actual number of layers:
+        enc_ffn_values = [ffn_embed_dim_mapping_inv[val] for val in enc_ffn_genes[:encoder_layer_num]]
+        dec_ffn_values = [ffn_embed_dim_mapping_inv[val] for val in dec_ffn_genes[:decoder_layer_num]]
+        enc_sa_values  = [sa_mapping_inv[val] for val in enc_sa_genes[:encoder_layer_num]]
+        dec_sa_values  = [sa_mapping_inv[val] for val in dec_sa_genes[:decoder_layer_num]]
+        dec_ende_values = [sa_mapping_inv[val] for val in dec_ende_genes[:decoder_layer_num]]
+        dec_arbitrary_values = [arbitrary_mapping_inv[val] for val in dec_arbitrary_genes[:decoder_layer_num]]
+        
+        # Construct a configuration dictionary from the genome:
+        config = {
+            "encoder": {
+                "encoder_embed_dim": encoder_embed_dim,
+                "encoder_ffn_embed_dim": enc_ffn_values,
+                "encoder_layer_num": encoder_layer_num,
+                "encoder_self_attention_heads": enc_sa_values,
+            },
+            "decoder": {
+                "decoder_embed_dim": decoder_embed_dim,
+                "decoder_ffn_embed_dim": dec_ffn_values,
+                "decoder_layer_num": decoder_layer_num,
+                "decoder_self_attention_heads": dec_sa_values,
+                "decoder_ende_attention_heads": dec_ende_values,
+                "decoder_arbitrary_ende_attn": dec_arbitrary_values,
+            }
+        }
+        
+        #print("Extracted configuration from genome:")
+        #print(config)
+
+        flattened = {
+            "encoder-embed-dim-subtransformer": config["encoder"]["encoder_embed_dim"],
+            "decoder-embed-dim-subtransformer": config["decoder"]["decoder_embed_dim"],
+
+            "encoder-ffn-embed-dim-all-subtransformer": config["encoder"]["encoder_ffn_embed_dim"],
+            "decoder-ffn-embed-dim-all-subtransformer": config["decoder"]["decoder_ffn_embed_dim"],
+
+            "encoder-layer-num-subtransformer": config["encoder"]["encoder_layer_num"],
+            "decoder-layer-num-subtransformer": config["decoder"]["decoder_layer_num"],
+
+            "encoder-self-attention-heads-all-subtransformer": config["encoder"]["encoder_self_attention_heads"],
+            "decoder-self-attention-heads-all-subtransformer": config["decoder"]["decoder_self_attention_heads"],
+            "decoder-ende-attention-heads-all-subtransformer": config["decoder"]["decoder_ende_attention_heads"],
+            "decoder-arbitrary-ende-attn-all-subtransformer": config["decoder"]["decoder_arbitrary_ende_attn"]
+        }
+
+        def to_builtin(x):
+            if isinstance(x, np.generic):          # numpy int/float/bool
+                return x.item()
+            if isinstance(x, list):
+                return [to_builtin(v) for v in x]
+            if isinstance(x, dict):
+                return {k: to_builtin(v) for k, v in x.items()}
+            return x
+
+        clean_flat = to_builtin(flattened)
+
+        class FlowDumper(yaml.SafeDumper):
+            pass
+
+        FlowDumper.add_representer(
+            list,
+            lambda self, value:
+                self.represent_sequence('tag:yaml.org,2002:seq',
+                                        value, flow_style=True)
+        )
+
+        
+        with open(self.SAMPLE_CONFIG_PATH, "w") as fout:
+            yaml.dump(clean_flat, fout,Dumper=FlowDumper, sort_keys=False, width=1000)
+
+        # Constant reference file 
+        REF_FILE = "/home/graham/Documents/hardware-aware-transformers/output/reference.txt"
+
+        gen_output_path = self.call_generate_script(self.MODEL_DIR, self.CHECKPOINT_FILE, self.DATA_BIN, self.SAMPLE_CONFIG_PATH)
+        
+        # extract only the hypothesis for scoring
+        sys_output_file = os.path.join("output", "sys_output.txt")
+        self.extract_hypothesis(gen_output_path, sys_output_file)
+        
+        # run score.py with hypothesis file (-s) and constant reference file (-r)
+        score_script = "/home/graham/Documents/hardware-aware-transformers/score.py"
+        score_command = f"python3 {score_script} -s {sys_output_file} -r {REF_FILE}"
+        #print("Running score.py with command:")
+        #print(score_command)
+        score_result = subprocess.run(score_command, shell=True, capture_output=True, text=True)
+        
+        print("Score script output:")
+        print(score_result.stdout)
+        if score_result.returncode != 0:
+            print("Error during scoring:")
+            print(score_result.stderr)
+
+        # parse bleu score from output
+        # Expected output contains something like: "BLEU4 = 30.80, 63.0/37.9/24.5/16.1 ..."
+        match = re.search(r"BLEU4\s*=\s*([\d\.]+)", score_result.stdout)
+        if match:
+            bleu_score = float(match.group(1))
+        else:
+            bleu_score = 0.0
+        print("Final BLEU Score (accuracy):", bleu_score)
+        
+        return bleu_score
     
     def placeholder_evaluate_accuracy(self, genome):
         """
@@ -209,8 +410,65 @@ class hat_architecture(BaseArchitecture):
         """
         return random.uniform(25, 40)
     
-   
+    def call_generate_script(self, model_dir, checkpoint_file, data_bin, sample_config_path):
+        """Call generate.py using subprocess and return the path to the output file."""
+        generate_script = "/home/graham/Documents/hardware-aware-transformers/generate.py"
+        beam_size = 1
+        batch_size = 1
+        gen_subset = "valid"
+        gpu = 0  # Use GPU 0
+        output_dir = "output"
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, "generate_output.txt")
+        
+        # Construct the command
+        command = [
+            "CUDA_VISIBLE_DEVICES={}".format(gpu),
+            "python3", generate_script,
+            "--data", data_bin,
+            "--path", os.path.join(model_dir, checkpoint_file),
+            "--gen-subset", gen_subset,
+            "--beam", str(beam_size),
+            "--batch-size", str(batch_size),
+            "--remove-bpe",
+            "--configs", sample_config_path
+        ]
+        print("running generate command")
+        #print("Running generate.py with command:")
+        #print(" ".join(command))
+
+        result = subprocess.run(" ".join(command), shell=True, capture_output=True, text=True)
+
+        # Save the generation output to file
+        with open(output_file, "w") as f:
+            f.write(result.stdout)
+
+        print(f"Generation complete. Results saved to {output_file}")
+        if result.returncode != 0:
+            print("Error during generation:")
+            print(result.stderr)
+        return output_file
+
+    def extract_hypothesis(self, gen_output_file, sys_output_file):
+        """
+        Extract only the hypothesis lines (lines starting with "H-") from the generate output.
+        For each such line, split by tabs and take the third field (if available) which contains
+        the actual generated translation.
+        """
+        with open(gen_output_file, "r") as fin, open(sys_output_file, "w") as fout:
+            for line in fin:
+                if line.startswith("H-"):
+                    parts = line.strip().split("\t")
+                    # Use the third field if available; otherwise, fallback to the second.
+                    if len(parts) >= 3:
+                        fout.write(parts[2] + "\n")
+                    elif len(parts) >= 2:
+                        fout.write(parts[1] + "\n")
+        print(f"Hypothesis extracted to {sys_output_file}")
+
+
     def evaluate_latency(self, genome) -> float:
+        print("evaluating latency")
         # ---------- build the sub‑transformer dict -----------------
         encoder_layer_num = genome[0]
         decoder_layer_num = genome[1]
@@ -259,50 +517,12 @@ class hat_architecture(BaseArchitecture):
         print(f"latency: {latency_ms} ms")
         return latency_ms
     
-    def evaluate_validation_loss(self, genome, max_batches: int = 10) -> float:
-        """
-        compute label-smoothed cross entropy loss using dataloader
-        """
-        
-        sub_cfg = self._genome_to_subtransformer_cfg(genome)
-        self.model.set_sample_config(sub_cfg)
-        self.model.eval()
-
-        # build a fresh iterator
-        valid_set = self.task.dataset("valid")
-        iterator = self.task.get_batch_iterator(
-            dataset=valid_set,
-            max_tokens   = self.args.max_tokens,
-            max_sentences= getattr(self.args, "batch_size", None),
-            max_positions= utils.resolve_max_positions(
-                            self.task.max_positions(),
-                            *[m.max_positions() for m in [self.model]]),
-            ignore_invalid_inputs=True,
-        ).next_epoch_itr(shuffle=False)
-
-        loss_sum, sent_sum = 0.0, 0
-        cuda = torch.cuda.is_available()
-
-        with torch.no_grad():
-            for idx, batch in enumerate(iterator):
-                if idx >= max_batches:
-                    break
-                batch = utils.move_to_cuda(batch) if cuda else batch
-
-                net_output                      = self.model(**batch["net_input"])
-                loss, sample_size, _            = self.criterion(self.model, batch, net_output)
-                loss_sum  += loss.item()
-                sent_sum  += sample_size        # sentence-average criterion
-        loss = loss_sum / sent_sum
-        print (f"loss: {loss}")
-        return loss_sum / sent_sum if sent_sum > 0 else float("nan")
-
     def _evaluate(self, x, out, *args, **kwargs):
         print("Starting evaluation:", x)
-        loss = self.evaluate_validation_loss(x)
+        accuracy = self.new_evaluate_accuracy(x)
         latency = self.evaluate_latency(x)
-        print("Completed evaluation!")
-        out["F"] = np.array([latency, loss])
+        print("Completed evaluation:", x)
+        out["F"] = np.array([latency, -accuracy])
 
     def generate_random_genome(self, fixed_length=40):
         """
@@ -382,70 +602,7 @@ class hat_architecture(BaseArchitecture):
         genome.extend(decoder_arbitrary)
 
         return genome
-    
-    @staticmethod 
-    def _genome_to_subtransformer_cfg(gene: np.ndarray) -> dict:
-        """
-        Decode a 40-gene chromosome into HAT sub-transformer config.
 
-        Genome layout
-        -------------
-        0   : encoder layer-num             ∈ {1..6}
-        1   : decoder layer-num             ∈ {1..6}
-        2   : encoder embed-dim             0→512, 1→640
-        3   : decoder embed-dim             0→512, 1→640
-        4-9 : encoder FFN dims (padded)     0→512, 1→1024, 2→2048
-        10-15: decoder FFN dims (padded)     same mapping
-        16-21: encoder SA heads (padded)     0→2,   1→4
-        22-27: decoder SA heads (padded)     same mapping
-        28-33: decoder En-De heads (padded)  same mapping
-        34-39: decoder arbitrary attn        0→-1, 1→1, 2→2 (padded)
-        """
-        # -------- inverse maps --------
-        map_embed  = {0: 512, 1: 640}
-        map_ffn    = {0: 512, 1: 1024, 2: 2048}
-        map_heads  = {0: 2,   1: 4}
-        map_arbit  = {0: -1,  1: 1,  2: 2}
-
-        # -------- slice genome --------
-        enc_layers = int(gene[0])
-        dec_layers = int(gene[1])
-
-        enc_emb    = map_embed[int(gene[2])]
-        dec_emb    = map_embed[int(gene[3])]
-
-        enc_ffn_raw  = gene[4:10]
-        dec_ffn_raw  = gene[10:16]
-        enc_sa_raw   = gene[16:22]
-        dec_sa_raw   = gene[22:28]
-        dec_ende_raw = gene[28:34]
-        dec_arbi_raw = gene[34:40]
-
-        # keep only the first **n_layers** entries, then map to real values
-        enc_ffn  = [map_ffn[int(v)]   for v in enc_ffn_raw[:enc_layers]]
-        dec_ffn  = [map_ffn[int(v)]   for v in dec_ffn_raw[:dec_layers]]
-        enc_sa   = [map_heads[int(v)] for v in enc_sa_raw[:enc_layers]]
-        dec_sa   = [map_heads[int(v)] for v in dec_sa_raw[:dec_layers]]
-        dec_ende = [map_heads[int(v)] for v in dec_ende_raw[:dec_layers]]
-        dec_arbi = [map_arbit[int(v)] for v in dec_arbi_raw[:dec_layers]]
-
-        # -------- build cfg dict --------
-        return {
-            "encoder": {
-                "encoder_embed_dim":           enc_emb,
-                "encoder_layer_num":           enc_layers,
-                "encoder_ffn_embed_dim":       enc_ffn,
-                "encoder_self_attention_heads": enc_sa,
-            },
-            "decoder": {
-                "decoder_embed_dim":           dec_emb,
-                "decoder_layer_num":           dec_layers,
-                "decoder_ffn_embed_dim":       dec_ffn,
-                "decoder_self_attention_heads": dec_sa,
-                "decoder_ende_attention_heads": dec_ende,
-                "decoder_arbitrary_ende_attn":  dec_arbi,
-            },
-        }
     class custom_sampling(BaseArchitecture.Sampling):
 
         def _do(self, problem, n_samples, **kwargs):
@@ -579,3 +736,22 @@ class hat_architecture(BaseArchitecture):
         def is_equal(self, a, b):
             return np.array_equal(a.X, b.X)
 
+class TimedSequenceGenerator:
+    def __init__(self, task, models, **gen_kwargs):
+        self.inner  = task.build_generator(gen_kwargs)
+        self.task   = task
+        self.models = models
+
+    def generate(self, models, sample):
+        """returns (hypos, enc_ms, dec_ms)"""
+        start = time.time()
+        hypos = self.task.inference_step(self.inner, self.models, sample)
+        dec_ms = (time.time() - start) * 1000
+
+        # crude encoder timing = forward of src-tokens only
+        enc_start = time.time()
+        with torch.no_grad():
+            models[0].encoder(sample['net_input']['src_tokens'])
+        enc_ms = (time.time() - enc_start) * 1000
+
+        return hypos, enc_ms, dec_ms

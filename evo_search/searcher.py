@@ -67,7 +67,7 @@ class evo_search:
         res = minimize(
             self.problem_arch, 
             algorithm,
-            ('n_gen', self.evolution_iterations), 
+            termination=('n_gen', self.evolution_iterations), 
             seed=1, 
             verbose=True
         )

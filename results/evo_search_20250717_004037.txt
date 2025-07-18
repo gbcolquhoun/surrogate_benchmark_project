@@ -1,0 +1,15 @@
+NSGA-II Optimization Completed
+================================
+Number of generations: 15
+Population size: 50
+
+Pareto Front Objectives (F):
+[[43.1399, -1.5522]]
+
+Pareto Front Solutions (X):
+[[ 6,  1,  1,  1,  2,  1,  1,  0,  1,  2,  0, -1, -1, -1, -1, -1,  1,  0,
+   1,  0,  1,  1,  0, -1, -1, -1, -1, -1,  0, -1, -1, -1, -1, -1,  0, -1,
+  -1, -1, -1, -1]]
+
+Additional Info:
+Algorithm details: <pymoo.algorithms.nsga2.NSGA2 object at 0x7f53c095fb20>
