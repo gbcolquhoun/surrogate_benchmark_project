@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Plot a Pareto front saved by surrogate_benchmark_project.
+Plot a HAT Pareto front saved by surrogate_benchmark_project.
 Usage
 -----
-python plot_pareto.py evo_search_20250718_105647.txt  \
-                     --out graphs/my_pareto.png
+python3 plot_pareto.py evo_search_20250718_105647.txt 
+
 The script looks for the file inside
 surrogate_benchmark_project/results/ by default.
+
 """
 import argparse, re, os, datetime as dt
 from pathlib import Path
@@ -86,19 +87,29 @@ def plot_pareto(obj: np.ndarray,
     """Create and save the scatter plot."""
     latency, loss = obj[:, 0], obj[:, 1]   # already positive
 
-    num_layers = genomes[:, 0]
-    colours = {2: "tab:red", 3: "tab:purple", 4: "tab:blue",
-               5: "tab:green", 6: "tab:orange"}
 
-    plt.figure(figsize=(8, 6))
-    for nl in sorted(set(num_layers)):
-        mask = num_layers == nl
-        plt.scatter(latency[mask], loss[mask],
-                    color=colours.get(nl, "black"),
-                    label=f"{nl} encoder layers")
+
+    decoder_layers = genomes[:, 1].astype(int)          # gene-1 is decoder depth
+
+    colours = {
+        1: "tab:gray",
+        2: "tab:red",
+        3: "tab:purple",
+        4: "tab:blue",
+        5: "tab:green",
+        6: "tab:orange",
+    }
+
+    for dl in sorted(colours):                 # loop over 1-6 even if some don’t appear
+        idx = decoder_layers == dl
+        if idx.any():                          # skip colours with no points
+            plt.scatter(latency[idx],
+                        loss[idx],
+                        label=f"{dl}-layer decoder",
+                        color=colours[dl])
 
     plt.xlabel("Latency (ms)")
-    plt.ylabel("Validation loss")
+    plt.ylabel("Validation Loss")
     nice_time = dt.datetime.now().strftime("%d %B %Y %H:%M")
     sub = f"{nice_time}"
     if meta:

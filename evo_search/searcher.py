@@ -1,18 +1,13 @@
 # /home/graham/Documents/surrogate_benchmark_project/evo_search/searcher.py
 import os
-import sys
-import argparse
 import numpy as np
-import random
 import yaml
-import pandas as pd
-import ast
+
 
 from pymoo.algorithms.nsga2 import NSGA2
-#from pymoo.model.termination import get_termination
+from pymoo.factory import get_termination
 from pymoo.optimize import minimize
-from pymoo.model.problem import Problem
-
+from pymoo.util.termination.max_gen import MaximumGenerationTermination
 
 
 from evo_search.architectures.flexibert_arch import *
@@ -59,17 +54,19 @@ class evo_search:
         algorithm = NSGA2(
             pop_size=self.population_size,
             sampling=self.problem_arch.custom_sampling(),
-            crossover=self.problem_arch.custom_crossover(),
-            mutation=self.problem_arch.custom_mutation(),
-            eliminate_duplicates=self.problem_arch.custom_duplicate_elimination()
+            crossover=self.problem_arch.custom_crossover_importance(),
+            mutation=self.problem_arch.custom_mutation_importance(),
+            eliminate_duplicates=self.problem_arch.custom_duplicate_elimination(),
+            termination = MaximumGenerationTermination(self.evolution_iterations)
         )
         
+        print(f"termination: {algorithm.termination}")
         res = minimize(
             self.problem_arch, 
             algorithm,
-            termination=('n_gen', self.evolution_iterations), 
             seed=1, 
-            verbose=True
+            verbose=True,
+            copy_algorithm=False
         )
         
         # Print the results.
@@ -108,43 +105,6 @@ class evo_search:
             with open(text_file_path, "w") as f:
                 f.write(text_content)
             print(f"Results saved to {text_file_path}")
-
-        if graph:
-            import matplotlib.pyplot as plt
-            import datetime
-            # Extract objectives from res.F.
-            # Since res.F[:,0] is latency and res.F[:,1] is -accuracy,
-            # we convert accuracy back to positive by multiplying by -1.
-            latency = res.F[:, 0]
-            accuracy = -res.F[:, 1]
-            
-            # Extract the number of layers from the genome (gene 0).
-            num_layers = res.X[:, 0].astype(int)
-            
-            # Define a simple color mapping: red for 2-layer solutions, blue for 4-layer solutions.
-            colors = {2: 'red', 4: 'blue'}
-            
-            plt.figure(figsize=(8, 6))
-            # Plot each solution, grouping by number of layers.
-            for nl in sorted(set(num_layers)):
-                indices = (num_layers == nl)
-                plt.scatter(latency[indices], accuracy[indices],
-                            color=colors.get(nl, 'black'),
-                            label=f"{nl} layers")
-                
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            arch = self.design_space.get("architecture", "unknown")
-            pop_size = self.population_size
-            n_gen = self.evolution_iterations
-            subheading = f"Architecture: {arch} | Population: {pop_size} | Generations: {n_gen}"
-    
-            plt.xlabel("Latency")
-            plt.ylabel("Accuracy")
-            plt.title(f"NSGA-II Generated Pareto Front\n{subheading}")
-            plt.legend()
-            plt.grid(True)
-            os.makedirs("graphs", exist_ok=True)
-            plt.savefig(f"graphs/evo_search_{timestamp}.png")            #plt.show()
 
     def run_exhaustive_search(self):
         self.problem_arch.generate_true_POF()

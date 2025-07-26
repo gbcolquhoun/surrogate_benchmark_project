@@ -1,7 +1,7 @@
 # Search parameters
 
-evolution_iterations: 8
-population_size: 25
+evolution_iterations: 30
+population_size: 125
 crossover_rate: 0.8
 mutation_rate: 0.1
 
