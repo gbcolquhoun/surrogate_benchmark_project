@@ -6,6 +6,9 @@ import torch
 import json
 from fairseq.models.transformer import TransformerModel
 from fairseq.models.transformer_super import TransformerSuperModel
+from fairseq.modules import LinearSuper
+from fairseq.modules.multihead_attention_super import MultiheadAttentionSuper
+
 import pandas as pd
 
 import os, pathlib, sys
@@ -16,7 +19,7 @@ from fairseq import checkpoint_utils, sequence_generator
 import math
 
 
-HAT_REPO = pathlib.Path(__file__).resolve().parents[3] / "hardware-aware-transformers"
+HAT_REPO = pathlib.Path(__file__).resolve().parents[3] / "surrogate_benchmark_project" / "hardware-aware-transformers"
 ckpt_rel = "latency_dataset/predictors/iwslt14deen_gpu_titanxp.pt"
 
 
@@ -45,15 +48,13 @@ class hat_architecture(BaseArchitecture):
 
         # set up some constants for supertransformer
         self._load_lut("/home/graham/Documents/cache/hat_lut.csv")
-        self.MODEL_DIR = "./"  
-        self.CHECKPOINT_FILE = "/home/graham/Documents/hardware-aware-transformers/HAT_iwslt14deen_super_space1.pt"
-        self.DATA_BIN = "/home/graham/Documents/hardware-aware-transformers/data/binary/iwslt14_de_en"
-        #self.DATA_BIN = "/home/graham/Documents/data/binary/iwslt14_de_en_valid1000"
-        self.SAMPLE_CONFIG_PATH = "/home/graham/Documents/surrogate_benchmark_project/output/intermediate_config.yaml"
+        self.CHECKPOINT_FILE = HAT_REPO / "HAT_iwslt14deen_super_space1.pt"
+        self.DATA_BIN = HAT_REPO / "data/binary/iwslt14_de_en"
 
         ensemble, self.args, self.task = checkpoint_utils.load_model_ensemble_and_task([self.CHECKPOINT_FILE], arg_overrides={"data": str(self.DATA_BIN)})
-
         self.model = ensemble[0]
+
+        self._enable_magnitude_selection(self.model, metric='l2')
         self.model.eval()
 
         args_ns = self.task.args                       # Namespace saved in checkpoint
@@ -200,7 +201,19 @@ class hat_architecture(BaseArchitecture):
         """
         return random.uniform(25, 40)
     
-   
+    def _enable_magnitude_selection(self, model, metric):
+        for m in model.modules():
+            if isinstance(m, LinearSuper):
+                m.selection_mode = 'topk'
+                m.metric = metric
+
+            if isinstance(m, MultiheadAttentionSuper):
+                m.selection_mode = "magnitude"
+                m.metric = metric
+                
+        model.eval()
+        torch.set_grad_enabled(False) 
+
     def evaluate_latency(self, genome) -> float:
         # ---------- build the sub‑transformer dict -----------------
         sub_cfg = self._genome_to_subtransformer_cfg(genome)
@@ -405,7 +418,7 @@ class hat_architecture(BaseArchitecture):
                 "decoder_arbitrary_ende_attn":  dec_arbi,
             },
         }
-        
+
 
     def _genome_key(self, genome: np.ndarray) -> str:
         """Stable string representation – JSON keeps order & is easy to read."""
@@ -567,7 +580,7 @@ class hat_architecture(BaseArchitecture):
                                     (34, 40)]   # decoder arbitrary attention  
 
             for j in range(n_matings):
-                parent_A = X[0, j]
+                parent_A = X[0, j] # split up parents from x variable
                 parent_B = X[1, j]
                 
                 mA, mB = self._total_mag(problem, parent_A), self._total_mag(problem, parent_B)
@@ -587,13 +600,12 @@ class hat_architecture(BaseArchitecture):
                     
                     dec_layers = int(child[1]) 
 
-
                     for (start, end) in decoder_group_ranges:      
                         for k in range(6):
                             pos = start + k
                             if k < dec_layers:           # the real layers
                                 donor = parent_A if np.random.rand() < pa else parent_B
-                                child[start:end] = donor[start:end]
+                                child[pos] = donor[pos]
                             else:                       
                                 child[pos] = -1
 
