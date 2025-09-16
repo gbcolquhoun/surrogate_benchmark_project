@@ -54,7 +54,7 @@ class hat_architecture(BaseArchitecture):
         ensemble, self.args, self.task = checkpoint_utils.load_model_ensemble_and_task([self.CHECKPOINT_FILE], arg_overrides={"data": str(self.DATA_BIN)})
         self.model = ensemble[0]
 
-        self._enable_magnitude_selection(self.model, metric='l2')
+        #self._enable_magnitude_selection(self.model, metric='l2')
         self.model.eval()
 
         args_ns = self.task.args                       # Namespace saved in checkpoint
@@ -71,6 +71,8 @@ class hat_architecture(BaseArchitecture):
         self.criterion = self.task.build_criterion(args_ns) 
         self.pad = self.task.target_dictionary.pad()
 
+        self.metric = "l2"         # or "l1" – matches _enable_magnitude_selection
+        self.eval_batches = 10 
 
         super().__init__(n_var=self.fixed_length, n_obj=num_obj, n_ieq_constr=0, xl=xl, xu=xu, vtype=int)
         
@@ -214,6 +216,66 @@ class hat_architecture(BaseArchitecture):
         model.eval()
         torch.set_grad_enabled(False) 
 
+    def _disable_magnitude_selection(self, model):
+        for m in model.modules():
+            if isinstance(m, LinearSuper):
+                m.selection_mode = 'prefix'
+                m.metric = 'l2'
+                # clear any overrides if your LinearSuper exposes them
+                if hasattr(m, "set_col_idx_override"): m.set_col_idx_override(None)
+                if hasattr(m, "set_row_idx_override"): m.set_row_idx_override(None)
+
+            if isinstance(m, MultiheadAttentionSuper):
+                m.selection_mode = 'prefix'
+                m.metric = 'l2'
+                # clear head selection & out_proj override
+                m._keep_heads = None
+                if hasattr(m.out_proj, "set_col_idx_override"):
+                    m.out_proj.set_col_idx_override(None)
+
+        model.eval()
+        torch.set_grad_enabled(False)
+
+    def enable_weight_magnitude(self, metric='l2'):
+        self._enable_magnitude_selection(self.model, metric=metric)
+
+    def disable_weight_magnitude(self):
+        self._disable_magnitude_selection(self.model)
+
+
+    def _set_selection_modes(self, lin_mode: str, mha_mode: str, metric: str = "l2"):
+        """
+        lin_mode in {"prefix", "topk"}
+        mha_mode in {"prefix", "magnitude"}  (your current custom behavior)
+        """
+        for m in self.model.modules():
+            if isinstance(m, LinearSuper):
+                m.selection_mode = lin_mode
+                m.metric = metric
+                # clear any explicit column/row overrides
+                if hasattr(m, "set_col_idx_override"):
+                    m.set_col_idx_override(None)
+                if hasattr(m, "set_row_idx_override"):
+                    m.set_row_idx_override(None)
+
+            if isinstance(m, MultiheadAttentionSuper):
+                m.selection_mode = mha_mode
+                m.metric = metric
+                # clear any previous “kept heads” so set_sample_config recomputes
+                if hasattr(m, "_keep_heads"):
+                    m._keep_heads = None
+                # if your LinearSuper out_proj had col overrides set earlier, clear them
+                if hasattr(m, "out_proj") and hasattr(m.out_proj, "set_col_idx_override"):
+                    m.out_proj.set_col_idx_override(None)
+        self.model.eval()
+        torch.set_grad_enabled(False)
+
+
+    def quick_eval(self, genome, batches: int = 10) -> float:
+        cfg = self._genome_to_subtransformer_cfg(genome)
+        self.model.set_sample_config(cfg)
+        return self.evaluate_validation_loss(genome, max_batches=batches)
+     
     def evaluate_latency(self, genome) -> float:
         # ---------- build the sub‑transformer dict -----------------
         sub_cfg = self._genome_to_subtransformer_cfg(genome)
@@ -281,7 +343,7 @@ class hat_architecture(BaseArchitecture):
 
         else:
             
-            loss = self.evaluate_validation_loss(x)
+            loss = self.evaluate_validation_loss(x, max_batches=self.eval_batches)
             latency = self.evaluate_latency(x)
 
             self.lut.loc[key, ["loss", "latency"]] = [loss, latency]
@@ -420,9 +482,28 @@ class hat_architecture(BaseArchitecture):
         }
 
 
+
     def _genome_key(self, genome: np.ndarray) -> str:
-        """Stable string representation – JSON keeps order & is easy to read."""
-        return json.dumps(genome.tolist())          # e.g. "[6,2,0,1,...,-1]"
+        base = json.dumps(genrome := genome.tolist())
+
+        # infer current modes (default to 'prefix' if fields are missing)
+        lin_mode = "prefix"
+        mha_mode = "prefix"
+        for m in self.model.modules():
+            if isinstance(m, LinearSuper):
+                lin_mode = getattr(m, "selection_mode", "prefix")
+                break
+        for m in self.model.modules():
+            if isinstance(m, MultiheadAttentionSuper):
+                mha_mode = getattr(m, "selection_mode", "prefix")
+                break
+
+        metric  = getattr(self, "metric", "l2")
+        batches = getattr(self, "eval_batches", 10)
+        ckpt    = Path(getattr(self, "CHECKPOINT_FILE", "ckpt.pt")).name
+
+        # single-line suffix appended to your existing key format
+        return f"{base}|lin={lin_mode}|mha={mha_mode}|met={metric}|ckpt={ckpt}|b={batches}"
     
     def _load_lut(self, lut_path: str):
 
@@ -554,111 +635,352 @@ class hat_architecture(BaseArchitecture):
 
 
     class custom_crossover_importance(BaseArchitecture.Crossover):
-        def __init__(self, n_parents=2, n_offsprings=2, prob=0.9, **kwargs):
-                    super().__init__(n_parents, n_offsprings, prob, **kwargs)
         
-        def _total_mag(self, problem, genome):
-            cfg   = problem._genome_to_subtransformer_cfg(genome)
+        def __init__(self, n_parents=2, n_offsprings=2, prob=0.9, **kwargs):
+            super().__init__(n_parents, n_offsprings, prob, **kwargs)
+
+            # fixed genome layout (40 genes)
+            self.E_FFN0, self.E_FFNN = 4, 10    
+            self.D_FFN0, self.D_FFNN = 10, 16   
+            self.E_SA0,  self.E_SAN  = 16, 22    
+            self.D_SA0,  self.D_SAN  = 22, 28    
+            self.D_EN0,  self.D_ENN  = 28, 34   
+            self.D_AR0,  self.D_ARN  = 34, 40  
+
+        # helpers
+
+        @staticmethod
+        def _sum_abs_params(layer) -> float:
+            s = 0.0; n = 0
+            for p in layer.parameters():
+                s += p.detach().abs().sum().item()
+                n += p.numel()
+            score = s / max(1, n) 
+            return score
+
+        def _cache_parent_layer_mags(self, problem, parent):
+            """return (enc_mags[6], dec_mags[dec_L], total_mag)"""
+            cfg = problem._genome_to_subtransformer_cfg(parent)
             model = problem.model
             model.set_sample_config(cfg)
-            param_means = [param.abs().mean().item() for param in model.parameters()]
-            total_mag = sum(param_means)
-            return total_mag
-        
-        def _do(self, problem, X, **kwargs):
 
-            n_parents, n_matings, n_var = X.shape # X expected to have shape (2, n_matings, 40)
-            offspring = np.empty_like(X)
+            enc_mags = [self._sum_abs_params(model.encoder.layers[i]) for i in range(6)]
+            dec_L = int(parent[1])
+            dec_mags = [self._sum_abs_params(model.decoder.layers[i]) for i in range(dec_L)]
+            total = sum(enc_mags) + sum(dec_mags)
+            return enc_mags, dec_mags, total
+
+        def _make_child(self, parent_A, parent_B,
+                    encA, decA, totA,
+                    encB, decB, totB,
+                    tie_break='A',
+                    eps=0.1, temp=2.0):
+            """
+            Build one child. tie_break used only as a fallback.
+            eps:  small exploration prob (epsilon-greedy)
+            temp: soft selection temperature (>1 = flatter/probabilistic, <1 = sharper)
+            """
+            import numpy as np
+
+            def _soft_pick(mA, mB, tie_break='A'):
+                # returns bool where a is true and b is false
+                if np.random.rand() < eps: # greed attack!!
+                    return np.random.rand() < 0.5   # coin flip
+
+                # soft preference by layer-normalized magnitude 
+                mA = 1e-12 if not np.isfinite(mA) or mA <= 0 else mA # check is not bullshit 
+                mB = 1e-12 if not np.isfinite(mB) or mB <= 0 else mB
+                wA = mA ** (1.0 / temp)
+                wB = mB ** (1.0 / temp)
+                denom = wA + wB
+                if not np.isfinite(denom) or denom <= 0:
+                    return (tie_break == 'A')
+                pA = wA / denom
+                return np.random.rand() < pA
+
+            child = np.empty_like(parent_A)
+
             
-            global_indices = list(range(0, 4))
-            encoder_group_ranges = [(4, 10),    # encoder FFN embed dims
-                                    (16, 22)]   # encoder self-attention heads
-                              
-            decoder_group_ranges =  [(10, 16),  # decoder FFN embed dims
-                                    (22, 28),   # decoder self-attention heads 
-                                    (28, 34),   # decoder encoder-decoder heads
-                                    (34, 40)]   # decoder arbitrary attention  
+            child[0] = 6  # encoder depth is always 6 in hat
+
+            decLA, decLB = int(parent_A[1]), int(parent_B[1]) # get decoder layer numbers
+            decA_sum = float(np.nansum(decA[:decLA])) if decLA > 0 else 0.0
+            decB_sum = float(np.nansum(decB[:decLB])) if decLB > 0 else 0.0
+            useA_depth = _soft_pick(decA_sum, decB_sum, tie_break=tie_break)
+            child_dec_layers = decLA if useA_depth else decLB
+            child_dec_layers = max(1, min(6, child_dec_layers))   # safety clamp
+            child[1] = child_dec_layers
+
+            #  pick embed dims from more important parent
+            useA_tot = _soft_pick(totA, totB, tie_break=tie_break)
+            winner = parent_A if useA_tot else parent_B
+            child[2] = winner[2]   
+            child[3] = winner[3]  
+
+            # encoder per-layer genes 
+            for l in range(6):
+                mA, mB = encA[l], encB[l]
+                useA = _soft_pick(mA, mB, tie_break=tie_break)
+                donor = parent_A if useA else parent_B
+                child[self.E_FFN0 + l] = donor[self.E_FFN0 + l]
+                child[self.E_SA0  + l] = donor[self.E_SA0  + l]
+
+            # decoder: only layers that exist in parents
+            kept = 0
+            
+
+            for l in range(6):
+                if l >= child_dec_layers:
+                    child[self.D_FFN0 + l] = -1
+                    child[self.D_SA0  + l] = -1
+                    child[self.D_EN0  + l] = -1
+                    child[self.D_AR0  + l] = -1
+                    continue
+
+                hasA = l < decLA
+                hasB = l < decLB
+
+                if hasA and hasB:
+                    mA = decA[l]
+                    mB = decB[l]
+                    useA = _soft_pick(mA, mB, tie_break=tie_break)
+                    donor = parent_A if useA else parent_B
+                elif hasA:
+                    donor = parent_A
+                elif hasB:
+                    donor = parent_B
+                else:
+                    print("decoder broken!!")
+                    donor = None
+
+                if donor is None:
+                    child[self.D_FFN0 + l] = -1
+                    child[self.D_SA0  + l] = -1
+                    child[self.D_EN0  + l] = -1
+                    child[self.D_AR0  + l] = -1
+                else:
+                    child[self.D_FFN0 + l] = donor[self.D_FFN0 + l]
+                    child[self.D_SA0  + l] = donor[self.D_SA0  + l]
+                    child[self.D_EN0  + l] = donor[self.D_EN0  + l]
+                    child[self.D_AR0  + l] = donor[self.D_AR0  + l]
+                    kept += 1
+            
+
+            return child
+
+            # main API
+
+        def _do(self, problem, X, **kwargs):
+            """
+            X: shape (2, n_matings, 40)
+            returns offspring: shape (2, n_matings, 40)
+            """
+            import numpy as np
+
+            n_parents, n_matings, n_var = X.shape
+            assert n_parents == 2, "Expect 2 parents."
+            offspring = np.empty_like(X)
 
             for j in range(n_matings):
-                parent_A = X[0, j] # split up parents from x variable
-                parent_B = X[1, j]
-                
-                mA, mB = self._total_mag(problem, parent_A), self._total_mag(problem, parent_B)
-                pa = 0.5 if mA + mB == 0 else mA / (mA + mB)
+                A = X[0, j].copy()
+                B = X[1, j].copy()
 
-                for i in range(n_parents):  # i=0 and i=1 for two offspring
-                    child = np.empty(n_var, dtype=X.dtype)
-                    
-                    
-                    for idx in global_indices: # for singular genes 
-                        donor = parent_A if np.random.rand() < pa else parent_B
-                        child[idx] = donor[idx]
-                    
-                    for (start, end) in encoder_group_ranges: # for each group of layer parameters, choose the entire block from one parent
-                        donor = parent_A if np.random.rand() < pa else parent_B
-                        child[start:end] = donor[start:end]
-                    
-                    dec_layers = int(child[1]) 
+                encA, decA, totA = self._cache_parent_layer_mags(problem, A)
+                encB, decB, totB = self._cache_parent_layer_mags(problem, B)
 
-                    for (start, end) in decoder_group_ranges:      
-                        for k in range(6):
-                            pos = start + k
-                            if k < dec_layers:           # the real layers
-                                donor = parent_A if np.random.rand() < pa else parent_B
-                                child[pos] = donor[pos]
-                            else:                       
-                                child[pos] = -1
+                offspring[0, j, :] = self._make_child(A, B, encA, decA, totA, encB, decB, totB, tie_break='A')
+                offspring[1, j, :] = self._make_child(A, B, encA, decA, totA, encB, decB, totB, tie_break='B')
 
-                    offspring[i, j, :] = child
-                    
             return offspring
         
     class custom_mutation_importance(BaseArchitecture.Mutation):
-
-        def __init__(self, mutation_rate=0.1, n_mut_blocks=1, max_retries=3, **kwargs):
-
+        """
+        Gene-wise mutation inside layers, biased to flip less-important layers more often,
+        and always returning a valid genome.
+        """
+        def __init__(self, mutation_rate=0.1, max_retries=3, **kwargs):
             super().__init__(**kwargs)
-            self.n_mut_blocks = n_mut_blocks
             self.mutation_rate = mutation_rate
             self.max_retries = max_retries
 
+            # index ranges in your 40-gene layout
+            self.ENC_FFN = list(range(4, 10))    # 6 genes (layers 0..5)
+            self.DEC_FFN = list(range(10, 16))   # 6 genes
+            self.ENC_SA  = list(range(16, 22))   # 6 genes
+            self.DEC_SA  = list(range(22, 28))   # 6 genes
+            self.DEC_ENDE= list(range(28, 34))   # 6 genes
+            self.DEC_ARBI= list(range(34, 40))   # 6 genes
 
-            @staticmethod
-            def _try_valid(problem, genome):
-                """Return True iff genome can be decoded without exception."""
-                try:
-                    _ = problem._genome_to_subtransformer_cfg(genome)
-                    return True
-                except Exception:
-                    return False
-                
-            # fixed groups used everywhere in the architecture
-            self.global_idx  = list(range(0, 4))
-            self.group_ranges = [
-                (4, 10),   # enc-FFN dims
-                (10, 16),  # dec-FFN dims
-                (16, 22),  # enc-SA heads
-                (22, 28),  # dec-SA heads
-                (28, 34),  # dec En-De heads
-                (34, 40)   # dec arbitrary attn
-            ]
+            # valid *codes* per slot (NOT mapped values)
+            self.C_EMB   = [0, 1]           # 512, 640
+            self.C_FFN   = [0, 1, 2]        # 512, 1024, 2048
+            self.C_SA    = [0, 1]           # 2, 4 heads
+            self.C_ENDE  = [0, 1]           # 2, 4 heads
+            self.C_ARBI  = [0, 1, 2]        # maps to {-1,1,2} at decode time
+
+        @staticmethod
+        def _try_valid(problem, genome):
+            try:
+                _ = problem._genome_to_subtransformer_cfg(genome)
+                return True
+            except Exception:
+                return False
+
+        def _layer_magnitudes(self, problem, genome):
+            """
+            Return per-layer |weight| sum for encoder (6) and decoder (<=6).
+            Missing decoder layers get NaN so we can skip them.
+            """
+            cfg = problem._genome_to_subtransformer_cfg(genome)
+            model = problem.model
+            model.set_sample_config(cfg)
+
+            enc_imp = []
+            for l in range(6):
+                s = 0.0
+                for p in model.encoder.layers[l].parameters():
+                    s += float(p.detach().abs().sum().item())
+                enc_imp.append(s)
+            enc_imp = np.asarray(enc_imp, dtype=np.float64)
+
+            dec_layers = int(genome[1])
+            dec_imp = np.full(6, np.nan, dtype=np.float64)
+            for l in range(dec_layers):
+                s = 0.0
+                for p in model.decoder.layers[l].parameters():
+                    s += float(p.detach().abs().sum().item())
+                dec_imp[l] = s
+
+            return enc_imp, dec_imp, dec_layers
+
+        @staticmethod
+        def _inv_scaled_probs(imp_vec):
+            """
+            Convert importance to [0,1] flip multipliers s.t. lower importance -> higher multiplier.
+            imp_vec: 1D np array; NaNs (for absent layers) remain NaN.
+            """
+            x = imp_vec.copy()
+            finite = np.isfinite(x)
+            if not finite.any():
+                # all missing -> nothing to flip
+                return np.zeros_like(x)
+            maxv = np.nanmax(x)
+            inv = maxv - x
+            inv[~finite] = np.nan
+            m = np.nanmax(inv)
+            if (not np.isfinite(m)) or m <= 1e-12:
+                # all equal or zero -> uniform
+                out = np.zeros_like(x)
+                out[finite] = 1.0
+                return out
+            out = inv / m
+            return out
+
+        @staticmethod
+        def _mutate_code(curr, choices):
+            """Pick a different code from the allowed set."""
+            alts = [c for c in choices if c != curr]
+            if not alts:
+                return curr
+            return np.random.choice(alts)
+
+        def _mutate_layer_slots(self, genome, layer_idx, flip_mult, is_decoder, dec_layers):
+            """
+            Mutate the genes for one layer, using flip probability multiplier 'flip_mult'.
+            Skip decoder layers >= dec_layers (keep -1 padding).
+            """
+            mr = self.mutation_rate
+
+            # encoder or decoder FFN gene
+            if not is_decoder:
+                # encoder layer -> must be active (your encoder is always 6)
+                pos = self.ENC_FFN[layer_idx]
+                if np.random.rand() < mr * flip_mult:
+                    genome[pos] = self._mutate_code(genome[pos], self.C_FFN)
+
+                pos = self.ENC_SA[layer_idx]
+                if np.random.rand() < mr * flip_mult:
+                    genome[pos] = self._mutate_code(genome[pos], self.C_SA)
+
+            else:
+                # decoder
+                if layer_idx >= dec_layers:
+                    # enforce padding
+                    genome[self.DEC_FFN[layer_idx]]   = -1
+                    genome[self.DEC_SA[layer_idx]]    = -1
+                    genome[self.DEC_ENDE[layer_idx]]  = -1
+                    genome[self.DEC_ARBI[layer_idx]]  = -1
+                    return
+
+                # active decoder layer: mutate each gene by its prob
+                pos = self.DEC_FFN[layer_idx]
+                if np.random.rand() < mr * flip_mult:
+                    genome[pos] = self._mutate_code(genome[pos], self.C_FFN)
+
+                pos = self.DEC_SA[layer_idx]
+                if np.random.rand() < mr * flip_mult:
+                    genome[pos] = self._mutate_code(genome[pos], self.C_SA)
+
+                pos = self.DEC_ENDE[layer_idx]
+                if np.random.rand() < mr * flip_mult:
+                    genome[pos] = self._mutate_code(genome[pos], self.C_ENDE)
+
+                pos = self.DEC_ARBI[layer_idx]
+                if np.random.rand() < mr * flip_mult:
+                    genome[pos] = self._mutate_code(genome[pos], self.C_ARBI)
+
+        def _fix_padding(self, genome):
+            """Ensure decoder padding matches decoder depth gene."""
+            dec_layers = int(genome[1])
+            for l in range(dec_layers, 6):
+                genome[self.DEC_FFN[l]]   = -1
+                genome[self.DEC_SA[l]]    = -1
+                genome[self.DEC_ENDE[l]]  = -1
+                genome[self.DEC_ARBI[l]]  = -1
+            return genome
 
         def _do(self, problem, X, **kwargs):
             X_mut = X.copy()
             n_ind, n_var = X.shape
 
-            lb, ub = problem.xl, problem.xu          # bounds per gene
-            FIXED = {0, 1}                           # <- keep encoder/decoder depth
-
             for i in range(n_ind):
-                for j in range(n_var):
-                    if j in FIXED:                   # skip the two block-count genes
-                        continue
-                    if np.random.rand() < self.mutation_rate:
-                        X_mut[i, j] = np.random.randint(lb[j], ub[j] + 1)
+                parent = X[i].copy()
+
+                for _ in range(self.max_retries):
+                    child = parent.copy()
+
+                    if np.random.rand() < 0.2 * self.mutation_rate:
+                        child[2] = self._mutate_code(child[2], self.C_EMB)
+                    if np.random.rand() < 0.2 * self.mutation_rate:
+                        child[3] = self._mutate_code(child[3], self.C_EMB)
+
+                    # Compute layer importances under the *current* child
+                    enc_imp, dec_imp, dec_layers = self._layer_magnitudes(problem, child)
+                    enc_flip = self._inv_scaled_probs(enc_imp)  # [6], 0..1
+                    dec_flip = self._inv_scaled_probs(dec_imp)  # [<=6 valid, NaN for padded]
+
+                    # Encoder: mutate each layer's genes with prob scaled by inverse importance
+                    for l in range(6):
+                        self._mutate_layer_slots(child, l, flip_mult=enc_flip[l], is_decoder=False, dec_layers=dec_layers)
+
+                    # Decoder: mutate only active layers; keep padded positions at -1
+                    for l in range(6):
+                        fm = 0.0 if not np.isfinite(dec_flip[l]) else dec_flip[l]
+                        self._mutate_layer_slots(child, l, flip_mult=fm, is_decoder=True, dec_layers=dec_layers)
+
+                    # Re-enforce decoder padding (in case any stray changes happened)
+                    child = self._fix_padding(child)
+
+                    # Validate
+                    if self._try_valid(problem, child):
+                        X_mut[i] = child
+                        break
+                else:
+                    # ran out of retries; keep the parent
+                    X_mut[i] = parent
 
             return X_mut
-        
+            
 
         def _block_mags(self, problem, genome):
             """return average |weight| for each group -> importance score"""
@@ -674,12 +996,12 @@ class hat_architecture(BaseArchitecture):
             return [mean_mag] * (len(self.group_ranges) + len(self.global_idx))
 
         def _pick_blocks(self, I_tilde):
-            """sample indices according to  (1-Î) / Σ(1-Î)"""
-            prob = (1.0 - I_tilde) / np.sum(1.0 - I_tilde)
-            return np.random.choice(len(I_tilde),
-                                    size=self.n_mut_blocks,
-                                    replace=False,
-                                    p=prob)
+                """sample indices according to  (1-Î) / Σ(1-Î)"""
+                prob = (1.0 - I_tilde) / np.sum(1.0 - I_tilde)
+                return np.random.choice(len(I_tilde),
+                                        size=self.n_mut_blocks,
+                                        replace=False,
+                                        p=prob)
 
 
 def _map(code, table, default_key=0):

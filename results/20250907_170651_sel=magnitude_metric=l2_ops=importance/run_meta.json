@@ -1,0 +1,83 @@
+{
+  "timestamp": "20250907_170651",
+  "run_id": "20250907_170651_sel=magnitude_metric=l2_ops=importance",
+  "modes": {
+    "use_weight_magnitude_selection": true,
+    "selection_metric": "l2",
+    "use_importance_operators": true
+  },
+  "evolution": {
+    "population_size": 10,
+    "generations": 5,
+    "termination": "<pymoo.util.termination.max_gen.MaximumGenerationTermination object at 0x7f346ba59100>",
+    "seed": null
+  },
+  "algorithm": "<pymoo.algorithms.nsga2.NSGA2 object at 0x7f346ba59850>",
+  "notes": "pareto_front.csv has genes+objectives combined; pareto_X.csv and pareto_F.csv are split; pareto_front.npz is raw arrays.",
+  "design_space": {
+    "architecture": "hat",
+    "benchmark_file": "evo_search/datasets/iwslt14deen_gpu_titanxp_all.csv",
+    "fixed_length": 40,
+    "metrics": [
+      "latency",
+      "BLEU"
+    ],
+    "search_space": {
+      "encoder-embed-choice": [
+        640,
+        512
+      ],
+      "decoder-embed-choice": [
+        640,
+        512
+      ],
+      "encoder-ffn-embed-dim-choice": [
+        2048,
+        1024,
+        512
+      ],
+      "decoder-ffn-embed-dim-choice": [
+        2048,
+        1024,
+        512
+      ],
+      "encoder-layer-num-choice": [
+        6
+      ],
+      "decoder-layer-num-choice": [
+        6,
+        5,
+        4,
+        3,
+        2,
+        1
+      ],
+      "encoder-self-attention-heads-choice": [
+        4,
+        2
+      ],
+      "decoder-self-attention-heads-choice": [
+        4,
+        2
+      ],
+      "decoder-ende-attention-heads-choice": [
+        4,
+        2
+      ],
+      "decoder-arbitrary-ende-attn-choice": [
+        -1,
+        1,
+        2
+      ]
+    }
+  },
+  "search_params": {
+    "evolution_iterations": 5,
+    "population_size": 10,
+    "crossover_rate": 0.8,
+    "mutation_rate": 0.1,
+    "use_weight_magnitude_selection": true,
+    "selection_metric": "l2",
+    "use_importance_operators": true
+  }
+}

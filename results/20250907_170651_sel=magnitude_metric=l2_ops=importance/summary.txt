@@ -1,0 +1,50 @@
+NSGA-II Optimization Completed
+================================
+Run ID: 20250907_170651_sel=magnitude_metric=l2_ops=importance
+Population size: 10
+Generations: 5
+Selection mode: weight-magnitude
+Selection metric: l2
+Operators: importance-based
+
+Algorithm:
+<pymoo.algorithms.nsga2.NSGA2 object at 0x7f346ba59850>
+
+Pareto Front (F):
+[[44.7764,  5.6619],
+ [77.729 ,  4.1745],
+ [77.3912,  4.374 ],
+ [78.7722,  4.1059],
+ [77.428 ,  4.289 ],
+ [76.0301,  4.5681],
+ [77.7149,  4.211 ]]
+
+Pareto Solutions (X):
+[[ 6,  1,  0,  1,  1,  0,  0,  0,  1,  2,  0, -1, -1, -1, -1, -1,  1,  1,
+   1,  1,  1,  1,  0, -1, -1, -1, -1, -1,  0, -1, -1, -1, -1, -1,  1, -1,
+  -1, -1, -1, -1],
+ [ 6,  2,  1,  1,  1,  2,  0,  1,  2,  1,  2,  2, -1, -1, -1, -1,  1,  0,
+   0,  0,  0,  1,  0,  1, -1, -1, -1, -1,  1,  1, -1, -1, -1, -1,  1,  0,
+  -1, -1, -1, -1],
+ [ 6,  2,  1,  1,  1,  2,  0,  1,  2,  1,  2,  2, -1, -1, -1, -1,  1,  0,
+   0,  0,  0,  1,  0,  1, -1, -1, -1, -1,  1,  0, -1, -1, -1, -1,  1,  0,
+  -1, -1, -1, -1],
+ [ 6,  2,  1,  1,  1,  2,  0,  0,  2,  2,  2,  2, -1, -1, -1, -1,  1,  0,
+   0,  1,  0,  0,  0,  1, -1, -1, -1, -1,  1,  1, -1, -1, -1, -1,  1,  1,
+  -1, -1, -1, -1],
+ [ 6,  2,  1,  1,  1,  2,  0,  0,  2,  2,  2,  2, -1, -1, -1, -1,  1,  0,
+   1,  1,  0,  0,  0,  0, -1, -1, -1, -1,  1,  1, -1, -1, -1, -1,  1,  2,
+  -1, -1, -1, -1],
+ [ 6,  2,  1,  1,  1,  2,  0,  1,  2,  1,  2,  0, -1, -1, -1, -1,  1,  0,
+   0,  0,  0,  0,  0,  1, -1, -1, -1, -1,  1,  1, -1, -1, -1, -1,  1,  1,
+  -1, -1, -1, -1],
+ [ 6,  2,  1,  1,  1,  2,  1,  1,  2,  1,  2,  2, -1, -1, -1, -1,  1,  0,
+   0,  0,  0,  1,  0,  1, -1, -1, -1, -1,  1,  1, -1, -1, -1, -1,  1,  0,
+  -1, -1, -1, -1]]
+
+Files:
+ - results/20250907_170651_sel=magnitude_metric=l2_ops=importance/pareto_front.csv
+ - results/20250907_170651_sel=magnitude_metric=l2_ops=importance/pareto_X.csv
+ - results/20250907_170651_sel=magnitude_metric=l2_ops=importance/pareto_F.csv
+ - results/20250907_170651_sel=magnitude_metric=l2_ops=importance/pareto_front.npz
+ - results/20250907_170651_sel=magnitude_metric=l2_ops=importance/run_meta.json

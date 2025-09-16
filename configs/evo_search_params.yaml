@@ -1,9 +1,12 @@
 # Search parameters
 
-evolution_iterations: 5
-population_size: 10
+evolution_iterations: 30
+population_size: 125
 crossover_rate: 0.8
 mutation_rate: 0.1
 
+# 30 evo iter, 125 pop in HAT paper
 
-# 30, 125 in paper
+use_weight_magnitude_selection: false
+selection_metric: l2                   
+use_importance_operators: true

@@ -1,0 +1,38 @@
+NSGA-II Pareto Front Comparison
+================================
+A: 20250909_184827_sel=prefix_metric=na_ops=importance
+   Pop=10  Gen=5  Points=10
+B: 20250907_165447_sel=prefix_metric=na_ops=vanilla
+   Pop=10  Gen=5  Points=9
+
+Reference point (lat, loss): [210.18486499786377, 2.4916694987794172]
+Hypervolume A: 169.575098
+Hypervolume B: 176.800214
+Coverage A dominated by B: 40.0%
+Coverage B dominated by A: 11.1%
+
+Interpretation:
+- Higher hypervolume is better (more area dominated toward the origin).
+- Coverage shows how much of one front is strictly dominated by the other.
+
+Front A (latency, loss):
+   44.7764,  2.2917
+   44.8001,  1.5569
+   45.9788,  1.5436
+   46.1880,  1.5294
+   46.9559,  1.5249
+   78.8651,  1.4892
+  141.5723,  1.4447
+  142.4883,  1.4175
+  204.7197,  1.4057
+  205.1849,  1.3891
+Front B (latency, loss):
+   44.6018,  1.6114
+   45.9788,  1.5436
+   47.0481,  1.4981
+   78.8651,  1.4892
+   79.0634,  1.4345
+   79.0634,  1.4345
+  142.3193,  1.4256
+  142.6949,  1.4243
+  142.8888,  1.3730

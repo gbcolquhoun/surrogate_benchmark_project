@@ -1,95 +1,55 @@
 #!/usr/bin/env python3
-"""
-Plot a HAT Pareto front saved by surrogate_benchmark_project.
-Usage
------
-python3 plot_pareto.py evo_search_20250718_105647.txt 
-
-The script looks for the file inside
-surrogate_benchmark_project/results/ by default.
-
-"""
-import argparse, re, os, datetime as dt
+import argparse, json, datetime as dt
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 
-# ------------------------------------------------------------------ #
-# robust log-parsers
-# ------------------------------------------------------------------ #
-def load_objectives(path: Path) -> np.ndarray:
-    """Return an (n,2) array of [latency, loss] points."""
-    txt = path.read_text()
+def load_run(run_dir: Path, genome_len: int = 40):
+    """Load objectives (latency, loss), genomes, and Pop/Gen from run_dir."""
+    pf = run_dir / "pareto_F.csv"
+    px = run_dir / "pareto_X.csv"
+    meta_p = run_dir / "run_meta.json"
 
-    # grab the block after the header up to the next header
-    hdr = "Pareto Front Objectives (F):"
-    start = txt.find(hdr)
-    if start == -1:
-        raise RuntimeError("Header 'Pareto Front Objectives (F):' not found.")
+    if not pf.exists() or not px.exists() or not meta_p.exists():
+        raise FileNotFoundError("Expected pareto_F.csv, pareto_X.csv, run_meta.json in the run directory.")
 
-    tail = txt[start + len(hdr):]
-    stop = tail.find("Pareto Front Solutions")
-    tail = tail[:stop] if stop != -1 else tail
+    # Objectives
+    F = pd.read_csv(pf)
+    # Prefer columns named latency/loss (any case), else take first two numeric cols.
+    cols = {c.lower(): c for c in F.columns}
+    if "latency" in cols and "loss" in cols:
+        obj = F[[cols["latency"], cols["loss"]]].to_numpy(float)
+    else:
+        obj = F.select_dtypes(include=[np.number]).iloc[:, :2].to_numpy(float)
 
-    # collect every float in order
-    nums = re.findall(r"[-+]?\d+(?:\.\d+)?", tail)
-    if len(nums) % 2:
-        raise RuntimeError("Uneven number of floats in objective block.")
-    return np.asarray(nums, float).reshape(-1, 2)
+    # Genomes
+    X = pd.read_csv(px).select_dtypes(include=[np.number]).to_numpy(int)
+    if X.shape[1] != genome_len:
+        raise RuntimeError(f"pareto_X.csv has {X.shape[1]} columns; expected {genome_len}")
 
+    # Meta (Pop/Gen)
+    meta = json.loads(meta_p.read_text())
+    evo  = meta.get("evolution", {})
+    sp   = meta.get("search_params", {})
 
-def load_population(path: Path, genome_len: int = 40) -> np.ndarray:
-    """
-    Read *all* ints after the 'Pareto Front Solutions (X):' header
-    and chunk them into genomes of length `genome_len`.
-    """
-    txt = path.read_text()
-    hdr = "Pareto Front Solutions (X):"
-    start = txt.find(hdr)
-    if start == -1:
-        raise RuntimeError("Header 'Pareto Front Solutions (X):' not found.")
+    pop = evo.get("population_size", sp.get("population_size"))
+    gen = evo.get("generations",     sp.get("evolution_iterations"))
 
-    # grab text until 'Additional' or end
-    tail = txt[start + len(hdr):]
-    stop = tail.find("Additional Info")
-    if stop != -1:
-        tail = tail[:stop]
+    try: pop = int(pop)
+    except: pop = "?"
+    try: gen = int(gen)
+    except: gen = "?"
 
-    # every integer in order
-    ints = [int(x) for x in re.findall(r"-?\d+", tail)]
-    if len(ints) % genome_len:
-        raise RuntimeError(f"Total ints ({len(ints)}) not a multiple of {genome_len}.")
-
-    genomes = np.asarray(ints, int).reshape(-1, genome_len)
-    return genomes
+    return obj, X, {"population": pop, "generations": gen}
 
 
-def load_meta(path: Path) -> dict:
-    """Get 'generations' and 'population size' (may be missing)."""
-    txt = path.read_text()
-    meta = {}
-    gen = re.search(r"Number of generations:\s*(\d+)", txt)
-    pop = re.search(r"Population size:\s*(\d+)", txt)
-    if gen:
-        meta["generations"] = int(gen.group(1))
-    if pop:
-        meta["population"] = int(pop.group(1))
-    return meta
-
-
-# ------------------------------------------------------------------ #
-def plot_pareto(obj: np.ndarray,
-                genomes: np.ndarray,
-                meta: dict,
-                out_path: Path):
-    """Create and save the scatter plot."""
-    latency, loss = obj[:, 0], obj[:, 1]   # already positive
-
-
-
-    decoder_layers = genomes[:, 1].astype(int)          # gene-1 is decoder depth
+def plot_pareto(obj: np.ndarray, genomes: np.ndarray, meta: dict, out_path: Path):
+    """Old-style plot: bigger fig, two-line title, dotted grid, legend by decoder depth."""
+    latency, loss = obj[:, 0], obj[:, 1]
+    dec_layers = genomes[:, 1].astype(int)   # gene-1 = decoder depth
 
     colours = {
         1: "tab:gray",
@@ -100,22 +60,18 @@ def plot_pareto(obj: np.ndarray,
         6: "tab:orange",
     }
 
-    for dl in sorted(colours):                 # loop over 1-6 even if some don’t appear
-        idx = decoder_layers == dl
-        if idx.any():                          # skip colours with no points
-            plt.scatter(latency[idx],
-                        loss[idx],
-                        label=f"{dl}-layer decoder",
-                        color=colours[dl])
+    plt.figure(figsize=(9, 6))
+    for dl in sorted(colours):
+        idx = dec_layers == dl
+        if idx.any():
+            plt.scatter(latency[idx], loss[idx], label=f"dec={dl}", color=colours[dl])
 
     plt.xlabel("Latency (ms)")
     plt.ylabel("Validation Loss")
-    nice_time = dt.datetime.now().strftime("%d %B %Y %H:%M")
-    sub = f"{nice_time}"
-    if meta:
-        sub = (f"{sub} | Pop {meta.get('population','?')}"
-               f" | Gen {meta.get('generations','?')}")
-    plt.title(f"NSGA-II Pareto Front\n{sub}")
+
+    now = dt.datetime.now().strftime("%d %b %Y %H:%M")
+    plt.title(f"NSGA-II Pareto Front\n{now}\nPop {meta.get('population','?')} | Gen {meta.get('generations','?')}")
+
     plt.legend()
     plt.grid(True, ls=":")
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,30 +80,26 @@ def plot_pareto(obj: np.ndarray,
     print(f"Saved → {out_path}")
 
 
-# ------------------------------------------------------------------ #
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("logfile",
-                        help="log filename (just the file, no path needed)")
-    parser.add_argument("--out", default=None,
-                        help="PNG filename to save (default: auto-named)")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Plot Pareto front from a results directory.")
+    ap.add_argument("run_dir", help="Path to results directory (contains pareto_F.csv, pareto_X.csv, run_meta.json).")
+    ap.add_argument("--out", default=None, help="Output PNG (default: graphs/<run_dir_name>_pareto.png)")
+    ap.add_argument("--genome-len", type=int, default=40)
+    args = ap.parse_args()
 
-    # Resolve paths -------------------------------------------------
-    base_dir = Path(__file__).parent / "results"
-    log_path = base_dir / args.logfile
-    if not log_path.exists():
-        raise FileNotFoundError(f"Can't find {log_path}")
+    run_dir = Path(args.run_dir)
+    if not run_dir.is_dir():
+        # also try ./results/<name>
+        maybe = Path(__file__).parent / "results" / args.run_dir
+        if maybe.is_dir():
+            run_dir = maybe
+        else:
+            raise FileNotFoundError(f"Not a directory: {args.run_dir}")
 
-    out_path = (Path(args.out) if args.out else
-                Path("graphs") / (log_path.stem + "_pareto.png"))
+    obj, X, meta = load_run(run_dir, genome_len=args.genome_len)
 
-    # Parse + plot --------------------------------------------------
-    obj = load_objectives(log_path)
-    genomes = load_population(log_path)
-    meta = load_meta(log_path)
-
-    plot_pareto(obj, genomes, meta, out_path)
+    out = Path(args.out) if args.out else (Path(__file__).parent / "graphs" / f"{run_dir.name}_pareto.png")
+    plot_pareto(obj, X, meta, out)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,50 @@
+NSGA-II Optimization Completed
+================================
+Run ID: 20250909_195605_sel=prefix_metric=na_ops=importance
+Population size: 10
+Generations: 5
+Selection mode: prefix
+Selection metric: l2
+Operators: importance-based
+
+Algorithm:
+<pymoo.algorithms.nsga2.NSGA2 object at 0x7f5a721f9d90>
+
+Pareto Front (F):
+[[ 45.9788,   1.5436],
+ [ 78.8651,   1.4892],
+ [ 44.7764,   2.2917],
+ [ 46.188 ,   1.5294],
+ [ 44.4068,   2.3407],
+ [141.2497,   1.3709],
+ [200.1187,   1.3573]]
+
+Pareto Solutions (X):
+[[ 6,  1,  0,  1,  2,  0,  1,  2,  0,  2,  0, -1, -1, -1, -1, -1,  1,  1,
+   0,  1,  0,  0,  1, -1, -1, -1, -1, -1,  1, -1, -1, -1, -1, -1,  0, -1,
+  -1, -1, -1, -1],
+ [ 6,  2,  1,  1,  1,  2,  0,  1,  0,  1,  2,  2, -1, -1, -1, -1,  1,  0,
+   0,  0,  0,  0,  0,  1, -1, -1, -1, -1,  1,  1, -1, -1, -1, -1,  1,  1,
+  -1, -1, -1, -1],
+ [ 6,  1,  0,  1,  1,  0,  0,  0,  1,  2,  0, -1, -1, -1, -1, -1,  1,  1,
+   1,  1,  1,  1,  0, -1, -1, -1, -1, -1,  0, -1, -1, -1, -1, -1,  1, -1,
+  -1, -1, -1, -1],
+ [ 6,  1,  0,  1,  2,  0,  1,  2,  0,  2,  0, -1, -1, -1, -1, -1,  1,  1,
+   0,  1,  0,  1,  1, -1, -1, -1, -1, -1,  1, -1, -1, -1, -1, -1,  0, -1,
+  -1, -1, -1, -1],
+ [ 6,  1,  0,  1,  1,  0,  0,  0,  1,  2,  0, -1, -1, -1, -1, -1,  1,  1,
+   1,  1,  1,  0,  0, -1, -1, -1, -1, -1,  0, -1, -1, -1, -1, -1,  1, -1,
+  -1, -1, -1, -1],
+ [ 6,  4,  0,  0,  2,  0,  1,  2,  0,  2,  0,  2,  2,  1, -1, -1,  1,  1,
+   0,  1,  0,  0,  1,  0,  1,  1, -1, -1,  1,  1,  1,  0, -1, -1,  0,  2,
+   2,  0, -1, -1],
+ [ 6,  6,  0,  1,  2,  1,  1,  2,  0,  0,  0,  0,  1,  1,  2,  2,  1,  1,
+   1,  1,  0,  1,  1,  0,  1,  1,  1,  1,  1,  0,  1,  0,  1,  0,  0,  1,
+   0,  0,  0,  2]]
+
+Files:
+ - results/20250909_195605_sel=prefix_metric=na_ops=importance/pareto_front.csv
+ - results/20250909_195605_sel=prefix_metric=na_ops=importance/pareto_X.csv
+ - results/20250909_195605_sel=prefix_metric=na_ops=importance/pareto_F.csv
+ - results/20250909_195605_sel=prefix_metric=na_ops=importance/pareto_front.npz
+ - results/20250909_195605_sel=prefix_metric=na_ops=importance/run_meta.json
