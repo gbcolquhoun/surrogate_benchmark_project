@@ -680,10 +680,8 @@ class hat_architecture(BaseArchitecture):
             eps:  small exploration prob (epsilon-greedy)
             temp: soft selection temperature (>1 = flatter/probabilistic, <1 = sharper)
             """
-            import numpy as np
 
             def _soft_pick(mA, mB, tie_break='A'):
-                # returns bool where a is true and b is false
                 if np.random.rand() < eps: # greed attack!!
                     return np.random.rand() < 0.5   # coin flip
 
@@ -698,9 +696,8 @@ class hat_architecture(BaseArchitecture):
                 pA = wA / denom
                 return np.random.rand() < pA
 
-            child = np.empty_like(parent_A)
+            child = np.empty_like(parent_A)  # returns bool where a is true and b is false
 
-            
             child[0] = 6  # encoder depth is always 6 in hat
 
             decLA, decLB = int(parent_A[1]), int(parent_B[1]) # get decoder layer numbers
@@ -794,215 +791,102 @@ class hat_architecture(BaseArchitecture):
             return offspring
         
     class custom_mutation_importance(BaseArchitecture.Mutation):
-        """
-        Gene-wise mutation inside layers, biased to flip less-important layers more often,
-        and always returning a valid genome.
-        """
         def __init__(self, mutation_rate=0.1, max_retries=3, **kwargs):
             super().__init__(**kwargs)
             self.mutation_rate = mutation_rate
             self.max_retries = max_retries
-
-            # index ranges in your 40-gene layout
-            self.ENC_FFN = list(range(4, 10))    # 6 genes (layers 0..5)
-            self.DEC_FFN = list(range(10, 16))   # 6 genes
-            self.ENC_SA  = list(range(16, 22))   # 6 genes
-            self.DEC_SA  = list(range(22, 28))   # 6 genes
-            self.DEC_ENDE= list(range(28, 34))   # 6 genes
-            self.DEC_ARBI= list(range(34, 40))   # 6 genes
-
-            # valid *codes* per slot (NOT mapped values)
-            self.C_EMB   = [0, 1]           # 512, 640
-            self.C_FFN   = [0, 1, 2]        # 512, 1024, 2048
-            self.C_SA    = [0, 1]           # 2, 4 heads
-            self.C_ENDE  = [0, 1]           # 2, 4 heads
-            self.C_ARBI  = [0, 1, 2]        # maps to {-1,1,2} at decode time
+            self.ENC_FFN = list(range(4, 10))
+            self.DEC_FFN = list(range(10, 16))
+            self.ENC_SA  = list(range(16, 22))
+            self.DEC_SA  = list(range(22, 28))
+            self.DEC_EN  = list(range(28, 34))
+            self.DEC_AR  = list(range(34, 40))
+            self.C_EMB = [0, 1]
+            self.C_FFN = [0, 1, 2]
+            self.C_SA  = [0, 1]
+            self.C_EN  = [0, 1]
+            self.C_AR  = [0, 1, 2]
 
         @staticmethod
-        def _try_valid(problem, genome):
+        def _try_valid(problem, g):
             try:
-                _ = problem._genome_to_subtransformer_cfg(genome)
+                _ = problem._genome_to_subtransformer_cfg(g)
                 return True
             except Exception:
                 return False
 
-        def _layer_magnitudes(self, problem, genome):
-            """
-            Return per-layer |weight| sum for encoder (6) and decoder (<=6).
-            Missing decoder layers get NaN so we can skip them.
-            """
-            cfg = problem._genome_to_subtransformer_cfg(genome)
-            model = problem.model
-            model.set_sample_config(cfg)
-
-            enc_imp = []
-            for l in range(6):
-                s = 0.0
-                for p in model.encoder.layers[l].parameters():
-                    s += float(p.detach().abs().sum().item())
-                enc_imp.append(s)
-            enc_imp = np.asarray(enc_imp, dtype=np.float64)
-
-            dec_layers = int(genome[1])
-            dec_imp = np.full(6, np.nan, dtype=np.float64)
-            for l in range(dec_layers):
-                s = 0.0
-                for p in model.decoder.layers[l].parameters():
-                    s += float(p.detach().abs().sum().item())
-                dec_imp[l] = s
-
-            return enc_imp, dec_imp, dec_layers
+        def _layer_mags(self, problem, g):
+            cfg = problem._genome_to_subtransformer_cfg(g)
+            m = problem.model
+            m.set_sample_config(cfg)
+            enc = np.array([sum(float(p.detach().abs().sum().item()) for p in m.encoder.layers[i].parameters())
+                            for i in range(6)], dtype=np.float64)
+            dl = int(g[1])
+            dec = np.full(6, np.nan, dtype=np.float64)
+            for i in range(dl):
+                dec[i] = sum(float(p.detach().abs().sum().item()) for p in m.decoder.layers[i].parameters())
+            return enc, dec, dl
 
         @staticmethod
-        def _inv_scaled_probs(imp_vec):
-            """
-            Convert importance to [0,1] flip multipliers s.t. lower importance -> higher multiplier.
-            imp_vec: 1D np array; NaNs (for absent layers) remain NaN.
-            """
-            x = imp_vec.copy()
-            finite = np.isfinite(x)
-            if not finite.any():
-                # all missing -> nothing to flip
+        def _inv_scale(x):
+            x = x.copy()
+            fin = np.isfinite(x)
+            if not fin.any():
                 return np.zeros_like(x)
-            maxv = np.nanmax(x)
-            inv = maxv - x
-            inv[~finite] = np.nan
+            inv = np.nanmax(x) - x
+            inv[~fin] = np.nan
             m = np.nanmax(inv)
-            if (not np.isfinite(m)) or m <= 1e-12:
-                # all equal or zero -> uniform
-                out = np.zeros_like(x)
-                out[finite] = 1.0
-                return out
-            out = inv / m
-            return out
+            if not np.isfinite(m) or m <= 1e-12:
+                out = np.zeros_like(x); out[fin] = 1.0; return out
+            return inv / m
 
         @staticmethod
-        def _mutate_code(curr, choices):
-            """Pick a different code from the allowed set."""
-            alts = [c for c in choices if c != curr]
-            if not alts:
-                return curr
-            return np.random.choice(alts)
+        def _mut_code(curr, choices):
+            c = [v for v in choices if v != curr]
+            return curr if not c else np.random.choice(c)
 
-        def _mutate_layer_slots(self, genome, layer_idx, flip_mult, is_decoder, dec_layers):
-            """
-            Mutate the genes for one layer, using flip probability multiplier 'flip_mult'.
-            Skip decoder layers >= dec_layers (keep -1 padding).
-            """
-            mr = self.mutation_rate
+        def _mut_layer(self, g, i, prob, dec_layers):
+            r = self.mutation_rate * prob
+            if np.random.rand() < r: g[self.ENC_FFN[i]] = self._mut_code(g[self.ENC_FFN[i]], self.C_FFN)
+            if np.random.rand() < r: g[self.ENC_SA[i]]  = self._mut_code(g[self.ENC_SA[i]],  self.C_SA)
+            if i >= dec_layers:
+                g[self.DEC_FFN[i]] = g[self.DEC_SA[i]] = g[self.DEC_EN[i]] = g[self.DEC_AR[i]] = -1
+                return
+            if np.random.rand() < r: g[self.DEC_FFN[i]] = self._mut_code(g[self.DEC_FFN[i]], self.C_FFN)
+            if np.random.rand() < r: g[self.DEC_SA[i]]  = self._mut_code(g[self.DEC_SA[i]],  self.C_SA)
+            if np.random.rand() < r: g[self.DEC_EN[i]]  = self._mut_code(g[self.DEC_EN[i]],  self.C_EN)
+            if np.random.rand() < r: g[self.DEC_AR[i]]  = self._mut_code(g[self.DEC_AR[i]],  self.C_AR)
 
-            # encoder or decoder FFN gene
-            if not is_decoder:
-                # encoder layer -> must be active (your encoder is always 6)
-                pos = self.ENC_FFN[layer_idx]
-                if np.random.rand() < mr * flip_mult:
-                    genome[pos] = self._mutate_code(genome[pos], self.C_FFN)
-
-                pos = self.ENC_SA[layer_idx]
-                if np.random.rand() < mr * flip_mult:
-                    genome[pos] = self._mutate_code(genome[pos], self.C_SA)
-
-            else:
-                # decoder
-                if layer_idx >= dec_layers:
-                    # enforce padding
-                    genome[self.DEC_FFN[layer_idx]]   = -1
-                    genome[self.DEC_SA[layer_idx]]    = -1
-                    genome[self.DEC_ENDE[layer_idx]]  = -1
-                    genome[self.DEC_ARBI[layer_idx]]  = -1
-                    return
-
-                # active decoder layer: mutate each gene by its prob
-                pos = self.DEC_FFN[layer_idx]
-                if np.random.rand() < mr * flip_mult:
-                    genome[pos] = self._mutate_code(genome[pos], self.C_FFN)
-
-                pos = self.DEC_SA[layer_idx]
-                if np.random.rand() < mr * flip_mult:
-                    genome[pos] = self._mutate_code(genome[pos], self.C_SA)
-
-                pos = self.DEC_ENDE[layer_idx]
-                if np.random.rand() < mr * flip_mult:
-                    genome[pos] = self._mutate_code(genome[pos], self.C_ENDE)
-
-                pos = self.DEC_ARBI[layer_idx]
-                if np.random.rand() < mr * flip_mult:
-                    genome[pos] = self._mutate_code(genome[pos], self.C_ARBI)
-
-        def _fix_padding(self, genome):
-            """Ensure decoder padding matches decoder depth gene."""
-            dec_layers = int(genome[1])
-            for l in range(dec_layers, 6):
-                genome[self.DEC_FFN[l]]   = -1
-                genome[self.DEC_SA[l]]    = -1
-                genome[self.DEC_ENDE[l]]  = -1
-                genome[self.DEC_ARBI[l]]  = -1
-            return genome
+        def _fix_pad(self, g):
+            dl = int(g[1])
+            for i in range(dl, 6):
+                g[self.DEC_FFN[i]] = g[self.DEC_SA[i]] = g[self.DEC_EN[i]] = g[self.DEC_AR[i]] = -1
+            return g
 
         def _do(self, problem, X, **kwargs):
-            X_mut = X.copy()
-            n_ind, n_var = X.shape
-
-            for i in range(n_ind):
+            Xm = X.copy()
+            n, _ = X.shape #individuals, variables -> so pop, 40
+            for i in range(n): 
                 parent = X[i].copy()
-
                 for _ in range(self.max_retries):
                     child = parent.copy()
-
-                    if np.random.rand() < 0.2 * self.mutation_rate:
-                        child[2] = self._mutate_code(child[2], self.C_EMB)
-                    if np.random.rand() < 0.2 * self.mutation_rate:
-                        child[3] = self._mutate_code(child[3], self.C_EMB)
-
-                    # Compute layer importances under the *current* child
-                    enc_imp, dec_imp, dec_layers = self._layer_magnitudes(problem, child)
-                    enc_flip = self._inv_scaled_probs(enc_imp)  # [6], 0..1
-                    dec_flip = self._inv_scaled_probs(dec_imp)  # [<=6 valid, NaN for padded]
-
-                    # Encoder: mutate each layer's genes with prob scaled by inverse importance
+                    if np.random.rand() < self.mutation_rate: child[2] = self._mut_code(child[2], self.C_EMB)
+                    if np.random.rand() < self.mutation_rate: child[3] = self._mut_code(child[3], self.C_EMB)
+                    enc_imp, dec_imp, dl = self._layer_mags(problem, child)
+                    enc_p = self._inv_scale(enc_imp)
+                    dec_p = self._inv_scale(dec_imp)
                     for l in range(6):
-                        self._mutate_layer_slots(child, l, flip_mult=enc_flip[l], is_decoder=False, dec_layers=dec_layers)
-
-                    # Decoder: mutate only active layers; keep padded positions at -1
-                    for l in range(6):
-                        fm = 0.0 if not np.isfinite(dec_flip[l]) else dec_flip[l]
-                        self._mutate_layer_slots(child, l, flip_mult=fm, is_decoder=True, dec_layers=dec_layers)
-
-                    # Re-enforce decoder padding (in case any stray changes happened)
-                    child = self._fix_padding(child)
-
-                    # Validate
+                        p = enc_p[l] if np.isfinite(enc_p[l]) else 0.0
+                        q = (dec_p[l] if np.isfinite(dec_p[l]) else 0.0)
+                        self._mut_layer(child, l, prob=max(p, q), dec_layers=dl)
+                    child = self._fix_pad(child)
                     if self._try_valid(problem, child):
-                        X_mut[i] = child
+                        Xm[i] = child
                         break
                 else:
-                    # ran out of retries; keep the parent
-                    X_mut[i] = parent
-
-            return X_mut
+                    Xm[i] = parent
+            return Xm
             
-
-        def _block_mags(self, problem, genome):
-            """return average |weight| for each group -> importance score"""
-            cfg   = problem._genome_to_subtransformer_cfg(genome)
-            model = problem.model
-            model.set_sample_config(cfg)
-
-            mags = []
-            for p in model.parameters():
-                mags.append(p.detach().abs().mean().item())
-
-            mean_mag = np.mean(mags)
-            return [mean_mag] * (len(self.group_ranges) + len(self.global_idx))
-
-        def _pick_blocks(self, I_tilde):
-                """sample indices according to  (1-Î) / Σ(1-Î)"""
-                prob = (1.0 - I_tilde) / np.sum(1.0 - I_tilde)
-                return np.random.choice(len(I_tilde),
-                                        size=self.n_mut_blocks,
-                                        replace=False,
-                                        p=prob)
-
 
 def _map(code, table, default_key=0):
     if code == -1:
