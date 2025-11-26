@@ -2,16 +2,42 @@
 import os
 import numpy as np
 import yaml
-
-
+import datetime, os, json
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from pymoo.algorithms.nsga2 import NSGA2
 from pymoo.factory import get_termination
 from pymoo.optimize import minimize
 from pymoo.util.termination.max_gen import MaximumGenerationTermination
-
+from pymoo.model.callback import Callback
 
 from evo_search.architectures.flexibert_arch import *
 from evo_search.architectures.hat_arch import hat_architecture
+
+class _HistoryCallback(Callback):
+    """logs per generation population objectives for nsgaII """
+    def __init__(self):
+        super().__init__()
+        self.history = []  
+
+    def notify(self, algorithm):
+        # current generation
+        gen = algorithm.n_gen
+        pop = algorithm.pop
+        F = pop.get("F")
+
+        if F is None:
+            return
+
+        for i, f in enumerate(F):
+            self.history.append({
+                "algo": "nsga2",
+                "gen": int(gen),
+                "idx": int(i),
+                "latency_ms": float(f[0]),
+                "valid_loss": float(f[1]),
+            })
 
 
 class evo_search:
@@ -64,8 +90,7 @@ class evo_search:
             if hasattr(self.problem_arch, "disable_weight_magnitude"):
                 self.problem_arch.disable_weight_magnitude()
 
-         # pick EA operators
-        if self.use_importance_operators:
+        if self.use_importance_operators: # pick EA operators
             crossover_op = self.problem_arch.custom_crossover_importance()
             mutation_op  = self.problem_arch.custom_mutation_importance()
             ops_tag = "ops=importance"
@@ -93,35 +118,26 @@ class evo_search:
         )
         
         if text_save:
-            import datetime, os, json
-            import numpy as np
-            import pandas as pd
 
-            # --- identify run + modes for easy comparison filenames ---
             timestamp   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             mode_tag    = "sel=magnitude" if getattr(self, "use_weight_magnitude_selection", False) else "sel=prefix"
             metric_tag  = f"metric={getattr(self, 'selection_metric', 'na')}" if getattr(self, "use_weight_magnitude_selection", False) else "metric=na"
             ops_tag     = "ops=importance" if getattr(self, "use_importance_operators", False) else "ops=vanilla"
             run_id      = f"{timestamp}_{mode_tag}_{metric_tag}_{ops_tag}"
 
-            # --- create a dedicated run folder ---
+    
             run_dir = os.path.join("results", run_id)
             os.makedirs(run_dir, exist_ok=True)
 
-            # --- convenience helpers ---
-            def _as_list(x):
-                # Handle None or empty gracefully
-                if x is None:
-                    return []
-                return x.tolist() if hasattr(x, "tolist") else list(x)
 
-            # --- build headers for CSVs (genes + objectives) ---
+
+           
             n_var = getattr(self.problem_arch, "n_var", None)
             X_cols = [f"gene_{i}" for i in range(n_var)] if n_var is not None else None
-            # If you have named objectives, put them here in order:
+         
             F_cols = ["latency_ms", "valid_loss"]
 
-            # --- save combined front as CSV (one row per nondominated solution) ---
+            
             X = res.X if res.X is not None else np.empty((0, 0))
             F = res.F if res.F is not None else np.empty((0, 0))
             if X_cols is None:  # fallback if n_var wasn't set
@@ -135,16 +151,14 @@ class evo_search:
                 combined_path = os.path.join(run_dir, "pareto_front.csv")
                 combined.to_csv(combined_path, index=False)
 
-            # --- save separate CSVs as well (sometimes handy) ---
+
             if X.size:
                 pd.DataFrame(X, columns=X_cols).to_csv(os.path.join(run_dir, "pareto_X.csv"), index=False)
             if F.size:
                 pd.DataFrame(F, columns=F_cols[:F.shape[1]]).to_csv(os.path.join(run_dir, "pareto_F.csv"), index=False)
 
-            # --- also save raw arrays in NPZ (lossless, quick to reload) ---
             np.savez_compressed(os.path.join(run_dir, "pareto_front.npz"), X=X, F=F)
 
-            # --- store meta + settings for reproducibility ---
             meta = {
                 "timestamp": timestamp,
                 "run_id": run_id,
@@ -162,7 +176,7 @@ class evo_search:
                 "algorithm": str(res.algorithm),
                 "notes": "pareto_front.csv has genes+objectives combined; pareto_X.csv and pareto_F.csv are split; pareto_front.npz is raw arrays."
             }
-            # If you want to also store the parsed YAMLs:
+     
             try:
                 meta["design_space"] = self.design_space
             except Exception:
@@ -175,7 +189,7 @@ class evo_search:
             with open(os.path.join(run_dir, "run_meta.json"), "w") as f:
                 json.dump(meta, f, indent=2)
 
-            # --- human-readable summary.txt (like your original, but richer) ---
+
             lines = []
             lines.append("NSGA-II Optimization Completed")
             lines.append("================================")
@@ -208,3 +222,109 @@ class evo_search:
             print(f"Results saved under: {run_dir}")
     def run_exhaustive_search(self):
         self.problem_arch.generate_true_POF()
+
+
+    def quick_latency_eval(self, gene):
+        return self.problem_arch.evaluate_latency(gene)
+    
+    def quick_bleu_eval(self, gene):
+        return self.problem_arch.evaluate_bleu_score(gene)
+    
+    def quick_val_loss(self, gene):
+        return self.problem_arch.evaluate_validation_loss(gene)
+
+    def run_validation_study(self):
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        mode_tag = "sel=magnitude" if getattr(self, "use_weight_magnitude_selection", False) else "sel=prefix"
+        metric_tag = f"metric={getattr(self, 'selection_metric', 'na')}" if getattr(self, "use_weight_magnitude_selection", False) else "metric=na"
+        ops_tag = "ops=importance" if getattr(self, "use_importance_operators", False) else "ops=vanilla"
+        run_id = f"{timestamp}_validation_{mode_tag}_{metric_tag}_{ops_tag}"
+
+        run_dir = os.path.join("results", run_id)
+        os.makedirs(run_dir, exist_ok=True)
+
+        if self.use_importance_operators:
+            crossover_op = self.problem_arch.custom_crossover_importance()
+            mutation_op = self.problem_arch.custom_mutation_importance()
+        else:
+            crossover_op = self.problem_arch.custom_crossover()
+            mutation_op = self.problem_arch.CustomMutation()
+
+        nsga_cb = _HistoryCallback()
+        algorithm = NSGA2(
+            pop_size=self.population_size,
+            sampling=self.problem_arch.custom_sampling(),
+            crossover=crossover_op,
+            mutation=mutation_op,
+            eliminate_duplicates=self.problem_arch.custom_duplicate_elimination(),
+            termination=MaximumGenerationTermination(self.evolution_iterations),
+        )
+
+        print(f"[validation] Running NSGA-II with {self.population_size} pop, {self.evolution_iterations} generations")
+
+        res_nsga = minimize(
+            self.problem_arch,
+            algorithm,
+            seed=2,
+            verbose=True,
+            copy_algorithm=False,
+            callback=nsga_cb,
+        )
+
+        df_hist = pd.DataFrame(nsga_cb.history)
+        df_hist["algo"] = "nsga2"
+
+        df_summary = (
+            df_hist.groupby(["algo", "gen"], as_index=False)
+                .agg(
+                    best_valid_loss=("valid_loss", "min"),
+                    mean_valid_loss=("valid_loss", "mean"),
+                    median_valid_loss=("valid_loss", "median"),
+                )
+                .sort_values(["algo", "gen"])
+        )
+
+        hist_path = os.path.join(run_dir, "validation_history.csv")
+        summary_path = os.path.join(run_dir, "validation_summary.csv")
+
+        df_hist.to_csv(hist_path, index=False)
+        df_summary.to_csv(summary_path, index=False)
+
+        meta = {
+            "timestamp": timestamp,
+            "run_id": run_id,
+            "modes": {
+                "use_weight_magnitude_selection": getattr(self, "use_weight_magnitude_selection", False),
+                "selection_metric": getattr(self, "selection_metric", None),
+                "use_importance_operators": getattr(self, "use_importance_operators", False),
+            },
+            "evolution": {
+                "population_size": self.population_size,
+                "generations": self.evolution_iterations,
+                "termination": str(res_nsga.algorithm.termination) if hasattr(res_nsga, "algorithm") else None,
+                "seed": getattr(self, "seed", None),
+            },
+            "paths": {
+                "validation_history": hist_path,
+                "validation_summary": summary_path,
+            },
+        }
+
+        try:
+            meta["design_space"] = self.design_space
+        except Exception:
+            meta["design_space"] = "unavailable"
+        try:
+            meta["search_params"] = self.search_params
+        except Exception:
+            meta["search_params"] = "unavailable"
+
+        meta_path = os.path.join(run_dir, "validation_meta.json")
+        with open(meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
+
+        print(f"[validation] Saved history -> {hist_path}")
+        print(f"[validation] Saved summary -> {summary_path}")
+        print(f"[validation] Saved meta -> {meta_path}")
+
+        return df_summary

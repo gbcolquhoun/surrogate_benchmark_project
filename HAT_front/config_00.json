@@ -1,0 +1,60 @@
+{
+  "encoder": {
+    "encoder_embed_dim": 640.0,
+    "encoder_layer_num": 6.0,
+    "encoder_ffn_embed_dim": [
+      512.0,
+      512.0,
+      512.0,
+      512.0,
+      512.0,
+      512.0
+    ],
+    "encoder_self_attention_heads": [
+      4.0,
+      4.0,
+      4.0,
+      4.0,
+      2.0,
+      4.0
+    ]
+  },
+  "decoder": {
+    "decoder_embed_dim": 512.0,
+    "decoder_layer_num": 1.0,
+    "decoder_ffn_embed_dim": [
+      1024.0,
+      1024.0,
+      2048.0,
+      1024.0,
+      1024.0,
+      2048.0
+    ],
+    "decoder_self_attention_heads": [
+      4.0,
+      4.0,
+      2.0,
+      2.0,
+      2.0,
+      4.0
+    ],
+    "decoder_ende_attention_heads": [
+      2.0,
+      4.0,
+      2.0,
+      4.0,
+      4.0,
+      4.0
+    ],
+    "decoder_arbitrary_ende_attn": [
+      2.0,
+      1.0,
+      2.0,
+      2.0,
+      2.0,
+      2.0
+    ]
+  },
+  "latency_ms": 42.022570967674255,
+  "valid_loss": 13.165625321935702
+}

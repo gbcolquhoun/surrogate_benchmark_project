@@ -60,23 +60,23 @@ def plot_pareto(obj: np.ndarray, genomes: np.ndarray, meta: dict, out_path: Path
         6: "tab:orange",
     }
 
-    plt.figure(figsize=(9, 6))
+    plt.figure(figsize=(12, 4))
     for dl in sorted(colours):
         idx = dec_layers == dl
         if idx.any():
             plt.scatter(latency[idx], loss[idx], label=f"dec={dl}", color=colours[dl])
 
-    plt.xlabel("Latency (ms)")
-    plt.ylabel("Validation Loss")
+    plt.xlabel("Predicted Latency (ms)")
+    plt.ylabel("Validation Loss (NLL/Token)")
 
     now = dt.datetime.now().strftime("%d %b %Y %H:%M")
-    plt.title(f"NSGA-II Pareto Front\n{now}\nPop {meta.get('population','?')} | Gen {meta.get('generations','?')}")
+    plt.title(f"NSGA-II Pareto Front | Pop {meta.get('population','?')} | Gen {meta.get('generations','?')}")
 
     plt.legend()
     plt.grid(True, ls=":")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=400)
     print(f"Saved → {out_path}")
 
 
@@ -84,8 +84,7 @@ def main():
     ap = argparse.ArgumentParser(description="Plot Pareto front from a results directory.")
     ap.add_argument("run_dir", help="Path to results directory (contains pareto_F.csv, pareto_X.csv, run_meta.json).")
     ap.add_argument("--out", default=None, help="Output PNG (default: graphs/<run_dir_name>_pareto.png)")
-    ap.add_argument("--genome-len", type=int, default=40)
-    args = ap.parse_args()
+    args = ap.parse_args() 
 
     run_dir = Path(args.run_dir)
     if not run_dir.is_dir():
@@ -96,7 +95,7 @@ def main():
         else:
             raise FileNotFoundError(f"Not a directory: {args.run_dir}")
 
-    obj, X, meta = load_run(run_dir, genome_len=args.genome_len)
+    obj, X, meta = load_run(run_dir, genome_len=40)
 
     out = Path(args.out) if args.out else (Path(__file__).parent / "graphs" / f"{run_dir.name}_pareto.png")
     plot_pareto(obj, X, meta, out)

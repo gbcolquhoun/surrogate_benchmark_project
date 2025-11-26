@@ -50,7 +50,7 @@ class hat_architecture(BaseArchitecture):
         self._load_lut("/home/graham/Documents/cache/hat_lut.csv")
         self.CHECKPOINT_FILE = HAT_REPO / "HAT_iwslt14deen_super_space1.pt"
         self.DATA_BIN = HAT_REPO / "data/binary/iwslt14_de_en"
-
+        self.REF_FILE = HAT_REPO / "output/reference.txt"
         ensemble, self.args, self.task = checkpoint_utils.load_model_ensemble_and_task([self.CHECKPOINT_FILE], arg_overrides={"data": str(self.DATA_BIN)})
         self.model = ensemble[0]
 
@@ -195,13 +195,6 @@ class hat_architecture(BaseArchitecture):
             
         # Convert to numpy arrays and return.
         return np.array(xl), np.array(xu)
-
-    
-    def placeholder_evaluate_accuracy(self, genome):
-        """
-        Placeholder accuracy evaluation that returns a random float between 25 and 40.
-        """
-        return random.uniform(25, 40)
     
     def _enable_magnitude_selection(self, model, metric):
         for m in model.modules():
@@ -261,33 +254,79 @@ class hat_architecture(BaseArchitecture):
             if isinstance(m, MultiheadAttentionSuper):
                 m.selection_mode = mha_mode
                 m.metric = metric
-                # clear any previous “kept heads” so set_sample_config recomputes
                 if hasattr(m, "_keep_heads"):
                     m._keep_heads = None
-                # if your LinearSuper out_proj had col overrides set earlier, clear them
                 if hasattr(m, "out_proj") and hasattr(m.out_proj, "set_col_idx_override"):
                     m.out_proj.set_col_idx_override(None)
         self.model.eval()
         torch.set_grad_enabled(False)
-
-
-    def quick_eval(self, genome, batches: int = 10) -> float:
-        cfg = self._genome_to_subtransformer_cfg(genome)
-        self.model.set_sample_config(cfg)
-        return self.evaluate_validation_loss(genome, max_batches=batches)
      
     def evaluate_latency(self, genome) -> float:
-        # ---------- build the sub‑transformer dict -----------------
+       
         sub_cfg = self._genome_to_subtransformer_cfg(genome)
-
-        # ---------- latency prediction -----------------------------
         latency_ms = self.latency_predictor.predict_lat(sub_cfg)
         print(f"latency: {latency_ms} ms")
         return latency_ms
-    
+
+    def validate_loss_new(self, genome, max_batches=None):
+        # meant to match HAT's method
+        print("validating loss")
+        sub_cfg = self._genome_to_subtransformer_cfg(genome)
+        self.model.set_sample_config(sub_cfg)
+        self.model.eval()
+        self.criterion.eval()
+
+        args = self.task.args
+        itr = self.task.get_batch_iterator(
+            dataset=self.task.dataset("valid"),
+            max_tokens=getattr(args, "max_tokens_valid", None),
+            max_sentences=getattr(args, "max_sentences_valid", None),
+            max_positions=utils.resolve_max_positions(
+                self.task.max_positions(),
+                self.model.max_positions(),
+            ),
+            ignore_invalid_inputs=getattr(args, "skip_invalid_size_inputs_valid_test", True),
+            required_batch_size_multiple=getattr(args, "required_batch_size_multiple", 1),
+            seed=getattr(args, "seed", 1),
+            num_shards=getattr(args, "distributed_world_size", 1),
+            shard_id=getattr(args, "distributed_rank", 0),
+            num_workers=getattr(args, "num_workers", 0),
+        ).next_epoch_itr(shuffle=False)
+
+        sentence_avg = getattr(args, "sentence_avg", False)
+        use_cuda = torch.cuda.is_available()
+
+        total_weighted_loss = 0.0  # sum over batches of (loss_value * weight)
+        total_weight = 0.0         # sum of weights (sample_size or nsentences)
+        seen = 0
+        cap = max_batches if max_batches is not None else getattr(self, "eval_batches", None)
+
+        with torch.no_grad():
+            for sample in itr:
+                if cap is not None and seen >= cap:
+                    break
+                seen += 1
+
+                if use_cuda:
+                    sample = utils.move_to_cuda(sample)
+
+                net_output = self.model(**sample["net_input"])
+                loss, sample_size, logging_output = self.criterion(self.model, sample, net_output)
+
+                weight = logging_output.get("nsentences", sample_size) if sentence_avg else sample_size
+                loss_value = float(logging_output.get("loss", 0.0))
+
+                total_weighted_loss += loss_value * float(weight)
+                total_weight += float(weight)
+
+        if total_weight == 0:
+            return float("inf")
+        return total_weighted_loss / total_weight
+
+
     def evaluate_validation_loss(self, genome, max_batches: int = 10) -> float:
         """
-        compute label-smoothed cross entropy loss using dataloader
+        compute avg nll loss / token
         """
         
         sub_cfg = self._genome_to_subtransformer_cfg(genome)
@@ -330,6 +369,68 @@ class hat_architecture(BaseArchitecture):
         print(f"mean_nll: {mean_nll:.4f}")  
         return mean_nll
 
+    def evaluate_bleu_score(self, genome):
+        import os, re, subprocess, yaml, numpy as np
+
+        # build flat config 
+        sub_cfg = self._genome_to_subtransformer_cfg(genome)
+        flattened = {
+            "encoder-embed-dim-subtransformer": sub_cfg["encoder"]["encoder_embed_dim"],
+            "decoder-embed-dim-subtransformer": sub_cfg["decoder"]["decoder_embed_dim"],
+            "encoder-ffn-embed-dim-all-subtransformer": sub_cfg["encoder"]["encoder_ffn_embed_dim"],
+            "decoder-ffn-embed-dim-all-subtransformer": sub_cfg["decoder"]["decoder_ffn_embed_dim"],
+            "encoder-layer-num-subtransformer": sub_cfg["encoder"]["encoder_layer_num"],
+            "decoder-layer-num-subtransformer": sub_cfg["decoder"]["decoder_layer_num"],
+            "encoder-self-attention-heads-all-subtransformer": sub_cfg["encoder"]["encoder_self_attention_heads"],
+            "decoder-self-attention-heads-all-subtransformer": sub_cfg["decoder"]["decoder_self_attention_heads"],
+            "decoder-ende-attention-heads-all-subtransformer": sub_cfg["decoder"]["decoder_ende_attention_heads"],
+            "decoder-arbitrary-ende-attn-all-subtransformer": sub_cfg["decoder"]["decoder_arbitrary_ende_attn"],
+        }
+
+        class FlowDumper(yaml.SafeDumper): pass
+        FlowDumper.add_representer(list, lambda self, v: self.represent_sequence('tag:yaml.org,2002:seq', v, flow_style=True))
+
+        sample_cfg_path = str(self.HAT_REPO / "output" / "intermediate_config.yaml") if hasattr(self, "HAT_REPO") else "/tmp/intermediate_config.yaml"
+        os.makedirs(os.path.dirname(sample_cfg_path), exist_ok=True)
+        with open(sample_cfg_path, "w") as f:
+            yaml.dump(flattened, f, Dumper=FlowDumper, sort_keys=False, width=1000)
+
+        # run generate.py 
+        generate_py = os.path.join(os.path.dirname(str(self.CHECKPOINT_FILE)), "generate.py")
+        out_dir = "output"; os.makedirs(out_dir, exist_ok=True)
+        gen_out = os.path.join(out_dir, "generate_output.txt")
+        cmd = [
+            f"CUDA_VISIBLE_DEVICES=0",
+            "python3", generate_py,
+            "--data", str(self.DATA_BIN),
+            "--path", str(self.CHECKPOINT_FILE),
+            "--gen-subset", "test",
+            "--beam", "5",
+            "--batch-size", "1",
+            "--remove-bpe",
+            "--configs", sample_cfg_path,
+        ]
+        res = subprocess.run(" ".join(cmd), shell=True, capture_output=True, text=True)
+        with open(gen_out, "w") as f: f.write(res.stdout)
+
+        # extract H- lines to sys_output.txt 
+        sys_out_file = os.path.join(out_dir, "sys_output.txt")
+        with open(gen_out) as fin, open(sys_out_file, "w") as fout:
+            for line in fin:
+                if line.startswith("H-"):
+                    parts = line.rstrip("\n").split("\t")
+                    fout.write((parts[2] if len(parts) >= 3 else parts[-1]) + "\n")
+
+        # score with score.py
+        score_py = os.path.join(os.path.dirname(str(self.CHECKPOINT_FILE)), "score.py")
+        score_cmd = f"python3 {score_py} -s {sys_out_file} -r {self.REF_FILE}"
+        score = subprocess.run(score_cmd, shell=True, capture_output=True, text=True)
+
+        m = re.search(r"BLEU4\s*=\s*([\d\.]+)", score.stdout)
+        bleu = float(m.group(1)) if m else 0.0
+        print(f"BLEU: {bleu:.2f}")
+        return bleu
+    
     def _evaluate(self, x, out, *args, **kwargs):
         print("Starting evaluation:", x)
         key = self._genome_key(x)
@@ -437,13 +538,12 @@ class hat_architecture(BaseArchitecture):
     @staticmethod
     def _genome_to_subtransformer_cfg(gene: np.ndarray) -> dict:
         """Decode a 40-gene chromosome into a HAT sub-transformer config."""
-        # ---------- inverse maps ----------
+      
         map_embed = {0: 512, 1: 640}
         map_ffn   = {0: 512, 1: 1024, 2: 2048}
         map_head  = {0: 2,   1: 4}
         map_arbi  = {0: -1,  1: 1,   2: 2}
 
-        # ---------- slice ----------
         enc_layers, dec_layers = int(gene[0]), int(gene[1])
         enc_emb = map_embed[int(gene[2])]
         dec_emb = map_embed[int(gene[3])]
@@ -455,7 +555,7 @@ class hat_architecture(BaseArchitecture):
         dec_ende_raw = gene[28:34]
         dec_arbi_raw = gene[34:40]
 
-        # ---------- safe mapping (ignore padding) ----------
+       
         enc_ffn  = [_map(v, map_ffn)   for v in enc_ffn_raw[:enc_layers]]
         dec_ffn  = [_map(v, map_ffn)   for v in dec_ffn_raw[:dec_layers]]
         enc_sa   = [_map(v, map_head)  for v in enc_sa_raw[:enc_layers]]
@@ -463,7 +563,7 @@ class hat_architecture(BaseArchitecture):
         dec_ende = [_map(v, map_head)  for v in dec_ende_raw[:dec_layers]]
         dec_arbi = [_map(v, map_arbi)  for v in dec_arbi_raw[:dec_layers]]
 
-        # ---------- build dict ----------
+       
         return {
             "encoder": {
                 "encoder_embed_dim":            enc_emb,
@@ -514,7 +614,7 @@ class hat_architecture(BaseArchitecture):
             self.lut = pd.DataFrame(columns=["loss", "latency"])
 
     def _save_lut(self):
-        lut_path = Path("/home/graham/Documents/cache/hat_lut.csv")
+        lut_path = Path("/home/graham/Documents/cache/hat_lut_newloss.csv")
         self.lut.to_csv(lut_path, index_label="genome_key") 
 
    

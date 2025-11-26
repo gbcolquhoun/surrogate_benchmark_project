@@ -17,9 +17,10 @@ def main():
     search_params = "configs/evo_search_params.yaml"
     print(" initializing evo_search")
     search = evo_search(design_space, search_params)
-    search.run_evo_search()
+    #search.run_evo_search()
     #search.run_exhaustive_search()
-
+    summary_df = search.run_validation_study()
+    print(summary_df.head())
 
 
 if __name__ == "__main__":
